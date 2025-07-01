@@ -1,3 +1,5 @@
+
+
 KERNEL_DIR=common
 BRANCH=
 DEFCONFIG=android_orangepi5_defconfig

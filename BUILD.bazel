@@ -1058,6 +1058,36 @@ pkg_install(
 
 # Orangepi 5_pro support-
 kernel_build(
+    name = "opi5_pro_defconfig",
+    outs = [
+        ".config",
+    ],
+    build_config = "build.config.opi5_pro",
+    make_goals = [
+        "android_orangepi5_defconfig",
+    ],
+)
+
+kernel_build(
+    name = "opi5_pro",
+    outs = [
+        "arch/arm64/boot/Image",
+        "arch/arm64/boot/dts/rockchip/rk3588s-orangepi-5-pro-1.dtb",
+
+    ],
+    build_config = "build.config.opi5_pro",
+    make_goals = [
+         "Image",
+         "dtbs",
+         
+    ],
+    
+    
+    kcflags = ["-D__ANDROID_COMMON_KERNEL__"],
+)
+
+# Orangepi 5_pro support-
+kernel_build(
     name = "opi5_defconfig",
     outs = [
         ".config",
@@ -1072,7 +1102,7 @@ kernel_build(
     name = "opi5",
     outs = [
         "arch/arm64/boot/Image",
-        "arch/arm64/boot/dts/rockchip/rk3588s-orangepi-5-pro-1.dtb",
+        "arch/arm64/boot/dts/rockchip/rk3588s-orangepi-5.dtb",
 
     ],
     build_config = "build.config.opi5",
