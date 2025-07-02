@@ -4,5 +4,5 @@
  *
  */
 
-#include "rk3588-base.dtsi"
+#include "rk3588-base-2.dtsi"
 #include "rk3588-opp.dtsi"

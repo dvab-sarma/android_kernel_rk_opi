@@ -9,7 +9,7 @@
 #include <dt-bindings/pinctrl/rockchip.h>
 #include <dt-bindings/usb/pd.h>
 #include <dt-bindings/soc/rockchip,vop2.h>
-#include "rk3588s.dtsi"
+#include "rk3588s-1.dtsi"
 
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
