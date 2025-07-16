@@ -8,6 +8,12 @@
 	model = "Xunlong Orange Pi 5";
 	compatible = "xunlong,orangepi-5", "rockchip,rk3588s";
 
+		aliases {
+		ethernet0 = &gmac1;
+		mmc1 = &sdmmc;
+		mmc0 = &sdhci;
+	};
+
 	vcc3v3_pcie20: regulator-vcc3v3-pcie20 {
 		compatible = "regulator-fixed";
 		enable-active-high;
@@ -28,5 +34,5 @@
 };
 
 &sfc {
-	status = "okay";
+	status = "disabled";
 };

@@ -14,6 +14,7 @@
 	aliases {
 		ethernet0 = &gmac1;
 		mmc1 = &sdmmc;
+		mmc0 = &sdhci;
 	};
 
 	chosen {
@@ -292,7 +293,7 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&usbc0_int>;
 		vbus-supply = <&vbus_typec>;
-		status = "okay";
+		status = "disabled";
 
 		usb_con: connector {
 			compatible = "usb-c-connector";
@@ -426,6 +427,7 @@
 &sdmmc {
 	bus-width = <4>;
 	cap-sd-highspeed;
+	cap-mmc-highspeed;
 	disable-wp;
 	max-frequency = <150000000>;
 	no-mmc;
@@ -447,6 +449,7 @@
 		spi-max-frequency = <100000000>;
 		spi-rx-bus-width = <4>;
 		spi-tx-bus-width = <1>;
+		status = "disabled";
 	};
 };
 
@@ -812,7 +815,7 @@
 	orientation-switch;
 	sbu1-dc-gpios = <&gpio4 RK_PA5 GPIO_ACTIVE_HIGH>;
 	sbu2-dc-gpios = <&gpio4 RK_PA7 GPIO_ACTIVE_HIGH>;
-	status = "okay";
+	status = "disabled";
 
 	port {
 		#address-cells = <1>;
@@ -841,7 +844,7 @@
 &usb_host0_xhci {
 	dr_mode = "otg";
 	usb-role-switch;
-	status = "okay";
+	status = "disabled";
 
 	port {
 		usb_host0_xhci_drd_sw: endpoint {
