@@ -59,6 +59,7 @@
 		clock-names = "lpo";
 		interrupt-parent = <&gpio2>;
 		interrupts = <RK_PC0 IRQ_TYPE_LEVEL_HIGH>;
+		max-speed = <3000000>;
 		interrupt-names = "host-wakeup";
 		device-wakeup-gpios = <&gpio2 RK_PC1 GPIO_ACTIVE_HIGH>;
 		shutdown-gpios = <&gpio2 RK_PB7 GPIO_ACTIVE_HIGH>;
