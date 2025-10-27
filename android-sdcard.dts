@@ -1,0 +1,48 @@
+/dts-v1/;
+
+/ {
+	compatible = "rockchip,rk3588","rockchip,rk3566","rockchip,rk3588s-orangepi-5-pro","rockchip,rk3566-orangepi-3b-v2.1","xunlong,orangepi-3b";
+
+	fragment@0 {
+		target-path = "/";
+
+		__overlay__ {
+
+			firmware {
+
+				android {
+					compatible = "android,firmware";
+					bootdevice = "sdcard";
+
+					fstab {
+						compatible = "android,fstab";
+
+						boot {
+							compatible = "android,boot";
+							dev = "/dev/block/mmcblk1p1";
+							type = "vfat";
+							mnt_flags = "ro";
+							fsmgr_flags = "wait,first_stage_mount";
+						};
+
+						system {
+							compatible = "android,system";
+							dev = "/dev/block/mmcblk1p2";
+							type = "ext4";
+							mnt_flags = "ro,barrier=1";
+							fsmgr_flags = "wait,first_stage_mount";
+						};
+
+						vendor {
+							compatible = "android,vendor";
+							dev = "/dev/block/mmcblk1p3";
+							type = "ext4";
+							mnt_flags = "ro,barrier=1";
+							fsmgr_flags = "wait,first_stage_mount";
+						};
+					};
+				};
+			};
+		};
+	};
+};

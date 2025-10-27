@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-config VIDEO_ROCKCHIP_VDEC_DEMO
+config VIDEO_ROCKCHIP_VDEC
 	tristate "Rockchip Video Decoder driver"
 	depends on ARCH_ROCKCHIP || COMPILE_TEST
 	depends on VIDEO_DEV
@@ -8,6 +8,7 @@ config VIDEO_ROCKCHIP_VDEC_DEMO
 	select VIDEOBUF2_VMALLOC
 	select V4L2_MEM2MEM_DEV
 	select V4L2_H264
+	select V4L2_HEVC
 	select V4L2_VP9
 	help
 	  Support for the Rockchip Video Decoder IP present on Rockchip SoCs,

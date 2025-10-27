@@ -9,7 +9,7 @@
 #include <dt-bindings/pinctrl/rockchip.h>
 #include <dt-bindings/usb/pd.h>
 #include <dt-bindings/soc/rockchip,vop2.h>
-#include "rk3588s-1.dtsi"
+#include "rk3588s-3.dtsi"
 
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
@@ -41,6 +41,53 @@
 			press-threshold-microvolt = <1800>;
 		};
 	};
+
+	bridge {
+		compatible = "lontinum,lt8712";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <0>;
+				hdmi_bridge_in: endpoint {
+					remote-endpoint = <&dp0_out_con>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+				hdmi_bridge_out: endpoint {
+					remote-endpoint = <&hdmi1_con_in>;
+				};
+			};
+		};
+	};
+
+	hdmi1-con {
+		compatible = "hdmi-connector";
+		type = "a";
+		port {
+			hdmi1_con_in: endpoint {
+				remote-endpoint = <&hdmi_bridge_out>;
+			};
+		};
+	};
+
+
+	// dp0-con {
+	// 	compatible = "dp-connector";
+	// 	label = "DP OUT";
+	// 	type = "mini";
+
+	// 	port {
+	// 		dp_con_in: endpoint {
+	// 			remote-endpoint = <&dp0_out_con>;
+	// 		};
+	// 	};
+	// };
+
+
 
     hdmi0-con {
 		compatible = "hdmi-connector";
@@ -203,42 +250,7 @@
 		post-power-on-delay-ms = <200>;
 		reset-gpios = <&gpio0 RK_PD0 GPIO_ACTIVE_LOW>;
 	};
-	// sound {
-	// 	status = "okay";
-	// 	compatible = "rockchip,multicodecs-card";
-	// 	rockchip,card-name = "es8388";
-	// 	hp-det-gpio = <&gpio1 RK_PD5 GPIO_ACTIVE_HIGH>;
-	// 	io-channels = <&saradc 3>;
-	// 	io-channel-names = "adc-detect";
-	// 	keyup-threshold-microvolt = <1800000>;
-	// 	poll-interval = <100>;
-	// 	hp-con-gpio = <&gpio4 RK_PB5 GPIO_ACTIVE_HIGH>;
-	// 	rockchip,format = "i2s";
-	// 	rockchip,mclk-fs = <256>;
-	// 	rockchip,cpu = <&i2s2_2ch>;
-	// 	rockchip,codec = <&es8388>;
-	// 	rockchip,audio-routing =
-	// 		"Headphone", "LOUT1",
-	// 		"Headphone", "ROUT1",
-	// 		"Speaker", "LOUT2",
-	// 		"Speaker", "ROUT2",
-	// 		"Headphone", "Headphone Power",
-	// 		"Headphone", "Headphone Power",
-	// 		"Speaker", "Speaker Power",
-	// 		"Speaker", "Speaker Power",
-	// 		"LINPUT1", "Main Mic",
-	// 		"LINPUT2", "Main Mic",
-	// 		"RINPUT1", "Headset Mic",
-	// 		"RINPUT2", "Headset Mic";
-	// 	pinctrl-names = "default";
-	// 	pinctrl-0 = <&hp_det>;
-	// 	play-pause-key {
-	// 		label = "playpause";
-	// 		linux,code = <KEY_PLAYPAUSE>;
-	// 		press-threshold-microvolt = <2000>;
-	// 	};
-		
-	// };
+
 	
 	analog-sound {
 		compatible = "simple-audio-card";
@@ -274,29 +286,6 @@
 		};
 	};
 
-	// wireless_bluetooth: wireless-bluetooth {
-	// 	compatible = "bluetooth-platdata";
-	// 	clocks = <&hym8563>;
-	// 	clock-names = "ext_clock";
-	// 	uart_rts_gpios = <&gpio3 RK_PD2 GPIO_ACTIVE_LOW>;
-	// 	pinctrl-names = "default", "rts_gpio";
-	// 	pinctrl-0 = <&uart9m2_rtsn>,  <&bt_reset_gpio>, <&bt_wake_gpio>, <&bt_irq_gpio>;
-	// 	pinctrl-1 = <&uart9_gpios>;
-	// 	BT,reset_gpio    = <&gpio0 RK_PD5 GPIO_ACTIVE_HIGH>;
-	// 	BT,wake_gpio     = <&gpio0 RK_PC6 GPIO_ACTIVE_HIGH>;
-	// 	BT,wake_host_irq = <&gpio0 RK_PC5 GPIO_ACTIVE_HIGH>;
-	// 	status = "okay";
-	// };
-
-	// wireless_wlan: wireless-wlan {
-	// 	compatible = "wlan-platdata";
-	// 	wifi_chip_type = "ap6256";
-	// 	pinctrl-names = "default";
-	// 	pinctrl-0 = <&wifi_host_wake_irq>;
-	// 	WIFI,host_wake_irq = <&gpio0 RK_PA0 GPIO_ACTIVE_HIGH>;
-	// 	WIFI,poweren_gpio = <&gpio0 RK_PD0 GPIO_ACTIVE_HIGH>;
-	// 	status = "okay";
-	// };
 
 	leds: gpio-leds {
 		compatible = "gpio-leds";
@@ -321,25 +310,7 @@
 
         
 	};
-	/*sound {
-	compatible = "simple-audio-card";
-	simple-audio-card,name = "Analog RK809";
-	simple-audio-card,format = "i2s";
-	simple-audio-card,mclk-fs = <256>;
 
-	simple-audio-card,cpu {
-		sound-dai = <&i2s0_8ch>;
-	};
-
-	simple-audio-card,codec {
-		sound-dai = <&dummy_codec>;
-	};
-		};
-
-	dummy_codec: dummy-codec {
-		compatible = "linux,bt-sco";
-		#sound-dai-cells = <0>;
-	};*/
 
 	fan: pwm-fan {
 		compatible = "pwm-fan";
@@ -364,6 +335,61 @@
 
 &gpu {
 	mali-supply = <&vdd_gpu_s0>;
+	status = "okay";
+};
+
+// &usbdp_phy0_dp {
+// 	status = "okay";
+// };
+
+// &usbdp_phy0_u3 {
+// 	status = "okay";
+// };
+
+&dp0 {
+	
+	//pinctrl-0 = <&dp0m0_pins>;
+	pinctrl-names = "default";
+	hpd-gpios = <&gpio4 RK_PB4 GPIO_ACTIVE_HIGH>;
+	pinctrl-0 = <&dp0_hpd>;
+
+	
+	status = "disabled";
+};
+
+&spdif_tx2{
+	status = "okay";
+};
+
+&dp0_in {
+	dp0_in_vp1: endpoint {
+		remote-endpoint = <&vp1_out_dp0>;
+	};
+};
+
+&dp0_out {
+	dp0_out_con: endpoint {
+		remote-endpoint = <&hdmi_bridge_in>;
+	};
+};
+
+// &dp0_out {
+
+// };
+
+&vdec0 {
+    status = "okay";
+};
+
+&vdec0_mmu {
+	status = "okay";
+};
+
+&av1d {
+	status = "okay";
+};
+
+&vdec0_sram {
 	status = "okay";
 };
 
@@ -837,10 +863,17 @@
 	};
 };
 
-&display_subsystem {
-	clocks = <&hdptxphy_hdmi0>;
-	clock-names = "hdmi0_phy_pll";
+&vp1 {
+	vp1_out_dp0: endpoint@a {
+		reg = <ROCKCHIP_VOP2_EP_DP0>;
+		remote-endpoint = <&dp0_in_vp1>;
+	};
 };
+
+// &display_subsystem {
+// 	clocks = <&hdptxphy_hdmi0>;
+// 	clock-names = "hdmi0_phy_pll";
+// };
 
 &cpu_l0 {
 	cpu-supply = <&vdd_cpu_lit_s0>;
@@ -1065,6 +1098,11 @@
 			//rockchip,pins = <0 RK_PC4 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
+	dp0 {
+		dp0_hpd: dp0-hpd {
+			rockchip,pins = <4 RK_PB4 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
 
     usb-typec {
 		usbc0_int: usbc0-int {
@@ -1183,7 +1221,8 @@
 
 &usb_host0_xhci {
 	status = "okay";
-	dr_mode = "host";
+	//dr_mode = "host";
+	dr_mode = "otg";
 	extcon = <&u2phy0>;
 };
 
@@ -1191,21 +1230,29 @@
 	status = "okay";
 };
 
+// &usb2phy0_grf {
+// 	status = "okay";
+// };
+
 &usbdp_phy0 {
 	status = "okay";
+	// rockchip,dp-lane-mux = <0 1>;
 	rockchip,dp-lane-mux = <0 1>;
 };
 
 &hdmi0 {
 	status = "okay";
-	enable-gpios = <&gpio4 RK_PB6 GPIO_ACTIVE_HIGH>;
-	cec-enable = "true";
+	//enable-gpios = <&gpio4 RK_PB6 GPIO_ACTIVE_HIGH>;
+	//cec-enable = "true";
 };
 
-&hdptxphy_hdmi0 {
+// &hdptxphy_hdmi0 {
+// 	status = "okay";
+// };
+
+&hdptxphy0 {
 	status = "okay";
 };
-
 /* watchdog */
 &wdt {
 	status = "okay";
@@ -1247,6 +1294,10 @@
 	pinctrl-0 = <&pwm6m0_pins>;
 	status = "okay";
 };
+
+// &i2s4_8ch {
+// 	status = "okay";
+// };
 
 &spi0 {
 	assigned-clocks = <&cru CLK_SPI0>;
@@ -1296,3 +1347,5 @@
 		remote-endpoint = <&hdmi0_con_in>;
 	};
 };
+
+
