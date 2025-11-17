@@ -2,6 +2,8 @@
 /*
  * Rockchip VDPU381 Video Decoder driver registers description
  *
+ * Copyright (C) Venkata Atchuta Bheemeswara Sarma Darbha <vdarbha0473@gmail.com>
+ *
  * Copyright (C) 2024 Collabora, Ltd.
  *  Detlev Casanova <detlev.casanova@collabora.com>
  */
