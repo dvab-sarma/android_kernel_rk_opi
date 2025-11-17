@@ -381,9 +381,13 @@
     status = "okay";
 };
 
-&vdec0_mmu {
-	status = "okay";
+&vdec1 {
+    status = "okay";
 };
+
+// &vdec0_mmu {
+// 	status = "disabled";
+// };
 
 &av1d {
 	status = "okay";
