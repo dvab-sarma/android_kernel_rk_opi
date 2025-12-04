@@ -181,3 +181,5 @@ sphinx_*/
 
 # Rust analyzer configuration
 /rust-project.json
+arch/arm64/boot/dts/rockchip/overlays/orangepi-pro-cam1.dts
+arch/arm64/boot/dts/rockchip/rk3588s-orangepi-5-pro-camera1.dtsi
