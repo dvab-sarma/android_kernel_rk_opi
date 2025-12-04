@@ -218,6 +218,22 @@
 	status = "okay";
 };
 
+&vdec0 {
+    status = "okay";
+};
+
+&vdec1 {
+    status = "okay";
+};
+
+&vdec0_sram {
+	status = "okay";
+};
+
+&vdec1_sram {
+	status = "okay";
+};
+
 &i2c0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c0m2_xfer>;

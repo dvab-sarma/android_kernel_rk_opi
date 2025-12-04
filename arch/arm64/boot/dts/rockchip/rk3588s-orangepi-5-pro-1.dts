@@ -303,8 +303,8 @@
 		green_led@2 {
 			gpios = <&gpio1 RK_PC2 GPIO_ACTIVE_HIGH>;
 			label = "green_led";
-			linux,default-trigger = "heartbeat";
-			linux,default-trigger-delay-ms = <0>;
+			linux,default-trigger = "disk-activity";
+			//linux,default-trigger-delay-ms = <0>;
 		};
 		
 
@@ -338,28 +338,16 @@
 	status = "okay";
 };
 
-// &usbdp_phy0_dp {
-// 	status = "okay";
-// };
-
-// &usbdp_phy0_u3 {
-// 	status = "okay";
-// };
 
 &dp0 {
 	
-	//pinctrl-0 = <&dp0m0_pins>;
+	pinctrl-0 = <&dp0m0_pins>;
 	pinctrl-names = "default";
-	hpd-gpios = <&gpio4 RK_PB4 GPIO_ACTIVE_HIGH>;
-	pinctrl-0 = <&dp0_hpd>;
-
-	
-	status = "disabled";
-};
-
-&spdif_tx2{
+	//hpd-gpios = <&gpio4 RK_PB4 GPIO_ACTIVE_HIGH>;
+	//pinctrl-0 = <&dp0_hpd>;	
 	status = "okay";
 };
+
 
 &dp0_in {
 	dp0_in_vp1: endpoint {
@@ -371,6 +359,10 @@
 	dp0_out_con: endpoint {
 		remote-endpoint = <&hdmi_bridge_in>;
 	};
+};
+
+&spdif_tx2{
+	status = "okay";
 };
 
 // &dp0_out {
@@ -394,6 +386,10 @@
 };
 
 &vdec0_sram {
+	status = "okay";
+};
+
+&vdec1_sram {
 	status = "okay";
 };
 
@@ -842,9 +838,9 @@
 	status = "okay";
 };
 
-&vpu121 {
-	status = "okay";
-};
+// &vpu121 {
+// 	status = "okay";
+// };
 
 &vop {
 	status = "okay";
@@ -1234,9 +1230,6 @@
 	status = "okay";
 };
 
-// &usb2phy0_grf {
-// 	status = "okay";
-// };
 
 &usbdp_phy0 {
 	status = "okay";

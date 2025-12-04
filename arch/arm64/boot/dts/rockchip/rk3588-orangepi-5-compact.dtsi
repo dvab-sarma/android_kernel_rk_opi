@@ -101,6 +101,7 @@
 	status = "okay";
 };
 
+
 &pwm9 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pwm9m2_pins>;

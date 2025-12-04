@@ -616,7 +616,10 @@
 };
 
 &usb_host0_xhci {
-	dr_mode = "host";
+	// dr_mode = "host";
+	phys = <&usb2phy0_otg>;
+	phy-names = "usb2-phy";
+	dr_mode = "otg";
 	status = "okay";
 };
 
@@ -629,6 +632,7 @@
 };
 
 &usb_host1_xhci {
+	dr_mode = "otg";
 	status = "okay";
 };
 

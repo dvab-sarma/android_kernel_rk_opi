@@ -198,6 +198,22 @@
 	};
 };
 
+&vdec0 {
+    status = "okay";
+};
+
+&vdec1 {
+    status = "okay";
+};
+
+&vdec0_sram {
+	status = "okay";
+};
+
+&vdec1_sram {
+	status = "okay";
+};
+
 &hdmi0_sound {
 	status = "okay";
 };

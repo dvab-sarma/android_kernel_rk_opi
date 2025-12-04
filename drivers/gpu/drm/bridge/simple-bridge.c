@@ -278,6 +278,13 @@ static const struct of_device_id simple_bridge_match[] = {
 			.connector_type = DRM_MODE_CONNECTOR_VGA,
 		},
 	},
+	 {
+		.compatible = "lontinum,lt8712",
+		.data = &(const struct simple_bridge_info) {
+			.connector_type = DRM_MODE_CONNECTOR_HDMIA,
+		},
+	},
+
 	{},
 };
 MODULE_DEVICE_TABLE(of, simple_bridge_match);

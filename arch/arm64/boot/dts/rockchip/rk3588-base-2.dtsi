@@ -1396,6 +1396,21 @@
 		status = "disabled";
 	};
 
+	spdif_tx2: spdif-tx@fddb0000 {
+		compatible = "rockchip,rk3588-spdif", "rockchip,rk3568-spdif";
+		reg = <0x0 0xfddb0000 0x0 0x1000>;
+		assigned-clock-parents = <&cru PLL_AUPLL>;
+		assigned-clocks = <&cru CLK_SPDIF2_DP0_SRC>;
+		clock-names = "mclk", "hclk";
+		clocks = <&cru MCLK_SPDIF2>, <&cru HCLK_SPDIF2_DP0>;
+		dma-names = "tx";
+		dmas = <&dmac1 6>;
+		interrupts = <GIC_SPI 195 IRQ_TYPE_LEVEL_HIGH 0>;
+		power-domains = <&power RK3588_PD_VO0>;
+		#sound-dai-cells = <0>;
+		status = "disabled";
+	};
+
 	i2s4_8ch: i2s@fddc0000 {
 		compatible = "rockchip,rk3588-i2s-tdm";
 		reg = <0x0 0xfddc0000 0x0 0x1000>;
@@ -1500,6 +1515,42 @@
 			dsi1_out: port@1 {
 				reg = <1>;
 			};
+		};
+	};
+
+	dp0: dp@fde50000 {
+		compatible = "rockchip,rk3588-dp";
+		reg = <0x0 0xfde50000 0x0 0x4000>;
+		interrupts = <GIC_SPI 161 IRQ_TYPE_LEVEL_HIGH 0>;
+		clocks = <&cru PCLK_DP0>, <&cru CLK_AUX16M_0>,
+			 <&cru CLK_DP0>, <&cru MCLK_I2S4_8CH_TX>,
+			 <&cru MCLK_SPDIF2_DP0>;
+		clock-names = "apb", "aux", "hdcp", "i2s", "spdif";
+		assigned-clocks = <&cru CLK_AUX16M_0>;
+		assigned-clock-rates = <16000000>;
+		resets = <&cru SRST_DP0>;
+		phys = <&usbdp_phy0 PHY_TYPE_DP>;
+		//phys = <&usbdp_phy0_dp>;
+		power-domains = <&power RK3588_PD_VO0>;
+		#sound-dai-cells = <1>;
+		status = "disabled";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			dp0_in: port@0 {
+				reg = <0>;
+			};
+
+			dp0_out: port@1 {
+				reg = <1>;
+			};
+			// port@1 {
+			// 	reg = <1>;
+
+			// 	dp0_out: endpoint { };
+			// };
 		};
 	};
 
@@ -2984,6 +3035,15 @@
 		rockchip,usbdpphy-grf = <&usbdpphy0_grf>;
 		rockchip,vo-grf = <&vo0_grf>;
 		status = "disabled";
+		// usbdp_phy0_dp: dp-port {
+		// 	#phy-cells = <0>;
+		// 	status = "okay";
+		// };
+
+		// usbdp_phy0_u3: u3-port {
+		// 	#phy-cells = <0>;
+		// 	status = "disabled";
+		// };
 	};
 
 	mipidcphy0: phy@feda0000 {
