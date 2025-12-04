@@ -89,6 +89,7 @@ struct rockchip_hdmi_qp {
 	struct regmap *regmap;
 	struct regmap *vo_regmap;
 	struct rockchip_encoder encoder;
+	struct drm_connector *connector;
 	struct dw_hdmi_qp *hdmi;
 	struct phy *phy;
 	struct gpio_desc *enable_gpio;
@@ -237,14 +238,17 @@ static void dw_hdmi_qp_rk3588_hpd_work(struct work_struct *work)
 	struct rockchip_hdmi_qp *hdmi = container_of(work,
 						     struct rockchip_hdmi_qp,
 						     hpd_work.work);
-	struct drm_device *drm = hdmi->encoder.encoder.dev;
-	bool changed;
+	// struct drm_device *drm = hdmi->encoder.encoder.dev;
+	// bool changed;
+	bool changed = drm_connector_helper_hpd_irq_event(hdmi->connector);
 
-	if (drm) {
-		changed = drm_helper_hpd_irq_event(drm);
-		if (changed)
-			dev_dbg(hdmi->dev, "connector status changed\n");
-	}
+	// if (drm) {
+	// 	changed = drm_helper_hpd_irq_event(drm);
+	// 	if (changed)
+	// 		dev_dbg(hdmi->dev, "connector status changed\n");
+	// }
+	if (changed)
+		dev_dbg(hdmi->dev, "connector status changed\n");
 }
 
 static irqreturn_t dw_hdmi_qp_rk3576_hardirq(int irq, void *dev_id)
@@ -434,12 +438,13 @@ static int dw_hdmi_qp_rockchip_bind(struct device *dev, struct device *master,
 	const struct rockchip_hdmi_qp_cfg *cfg;
 	struct dw_hdmi_qp_plat_data plat_data;
 	struct drm_device *drm = data;
-	struct drm_connector *connector;
+	//struct drm_connector *connector;
 	struct drm_encoder *encoder;
 	struct rockchip_hdmi_qp *hdmi;
 	struct resource *res;
 	struct clk_bulk_data *clks;
-	int ret, irq, i;
+	//int ret, irq, i;
+	int ret, hpd_irq, i;
 
 	if (!pdev->dev.of_node)
 		return -ENODEV;
@@ -539,17 +544,20 @@ static int dw_hdmi_qp_rockchip_bind(struct device *dev, struct device *master,
 	if (plat_data.main_irq < 0)
 		return plat_data.main_irq;
 
-	irq = platform_get_irq_byname(pdev, "hpd");
-	if (irq < 0)
-		return irq;
+	// irq = platform_get_irq_byname(pdev, "hpd");
+	// if (irq < 0)
+	// 	return irq;
 
-	ret = devm_request_threaded_irq(hdmi->dev, irq,
-					cfg->ctrl_ops->hardirq_callback,
-					cfg->ctrl_ops->irq_callback,
-					IRQF_SHARED, "dw-hdmi-qp-hpd",
-					hdmi);
-	if (ret)
-		return ret;
+	// ret = devm_request_threaded_irq(hdmi->dev, irq,
+	// 				cfg->ctrl_ops->hardirq_callback,
+	// 				cfg->ctrl_ops->irq_callback,
+	// 				IRQF_SHARED, "dw-hdmi-qp-hpd",
+	// 				hdmi);
+	// if (ret)
+	// 	return ret;
+	hpd_irq = platform_get_irq_byname(pdev, "hpd");
+	if (hpd_irq < 0)
+		return hpd_irq;
 
 	drm_encoder_helper_add(encoder, &dw_hdmi_qp_rockchip_encoder_helper_funcs);
 	drm_simple_encoder_init(drm, encoder, DRM_MODE_ENCODER_TMDS);
@@ -563,14 +571,29 @@ static int dw_hdmi_qp_rockchip_bind(struct device *dev, struct device *master,
 		return ret;
 	}
 
-	connector = drm_bridge_connector_init(drm, encoder);
-	if (IS_ERR(connector)) {
-		ret = PTR_ERR(connector);
-		dev_err(hdmi->dev, "failed to init bridge connector: %d\n", ret);
-		return ret;
-	}
+	//connector = drm_bridge_connector_init(drm, encoder);
+	// if (IS_ERR(connector)) {
+	// 	ret = PTR_ERR(connector);
+	// 	dev_err(hdmi->dev, "failed to init bridge connector: %d\n", ret);
+	// 	return ret;
+	// }
 
-	return drm_connector_attach_encoder(connector, encoder);
+	hdmi->connector = drm_bridge_connector_init(drm, encoder);
+	if (IS_ERR(hdmi->connector))
+		return dev_err_probe(hdmi->dev, PTR_ERR(hdmi->connector),
+ 				     "Failed to init bridge connector\n");
+
+	//return drm_connector_attach_encoder(connector, encoder);
+
+	ret = drm_connector_attach_encoder(hdmi->connector, encoder);
+	if (ret)
+		return ret;
+
+	return devm_request_threaded_irq(hdmi->dev, hpd_irq,
+					 cfg->ctrl_ops->hardirq_callback,
+					 cfg->ctrl_ops->irq_callback,
+					 IRQF_SHARED, "dw-hdmi-qp-hpd",
+					 hdmi);
 }
 
 static void dw_hdmi_qp_rockchip_unbind(struct device *dev,
