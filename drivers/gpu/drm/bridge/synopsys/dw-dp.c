@@ -1700,7 +1700,9 @@ static bool dw_dp_hpd_detect_link(struct dw_dp *dp)
 	return !ret;
 }
 
-static enum drm_connector_status dw_dp_bridge_detect(struct drm_bridge *bridge)
+// static enum drm_connector_status dw_dp_bridge_detect(struct drm_bridge *bridge)
+static enum drm_connector_status dw_dp_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector)
+
 {
 	struct dw_dp *dp = bridge_to_dp(bridge);
 

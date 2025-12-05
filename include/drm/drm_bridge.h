@@ -518,21 +518,23 @@ struct drm_bridge_funcs {
 	 */
 	struct drm_bridge_state *(*atomic_reset)(struct drm_bridge *bridge);
 
-	/**
-	 * @detect:
-	 *
-	 * Check if anything is attached to the bridge output.
-	 *
-	 * This callback is optional, if not implemented the bridge will be
-	 * considered as always having a component attached to its output.
-	 * Bridges that implement this callback shall set the
-	 * DRM_BRIDGE_OP_DETECT flag in their &drm_bridge->ops.
-	 *
-	 * RETURNS:
-	 *
-	 * drm_connector_status indicating the bridge output status.
-	 */
-	enum drm_connector_status (*detect)(struct drm_bridge *bridge);
+	// /**
+	//  * @detect:
+	//  *
+	//  * Check if anything is attached to the bridge output.
+	//  *
+	//  * This callback is optional, if not implemented the bridge will be
+	//  * considered as always having a component attached to its output.
+	//  * Bridges that implement this callback shall set the
+	//  * DRM_BRIDGE_OP_DETECT flag in their &drm_bridge->ops.
+	//  *
+	//  * RETURNS:
+	//  *
+	//  * drm_connector_status indicating the bridge output status.
+	//  */
+	// enum drm_connector_status (*detect)(struct drm_bridge *bridge);
+	enum drm_connector_status (*detect)(struct drm_bridge *bridge,
+					    struct drm_connector *connector);
 
 	/**
 	 * @detect_ctx:
@@ -1070,7 +1072,9 @@ drm_atomic_helper_bridge_propagate_bus_fmt(struct drm_bridge *bridge,
 					u32 output_fmt,
 					unsigned int *num_input_fmts);
 
-enum drm_connector_status drm_bridge_detect(struct drm_bridge *bridge);
+//enum drm_connector_status drm_bridge_detect(struct drm_bridge *bridge);
+enum drm_connector_status
+drm_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector);
 int drm_bridge_detect_ctx(struct drm_bridge *bridge,
 			  struct drm_connector *connector,
 			  struct drm_modeset_acquire_ctx *ctx);

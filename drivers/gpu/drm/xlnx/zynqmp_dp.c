@@ -1719,7 +1719,9 @@ disconnected:
 	return connector_status_disconnected;
 }
 
-static enum drm_connector_status zynqmp_dp_bridge_detect(struct drm_bridge *bridge)
+//static enum drm_connector_status zynqmp_dp_bridge_detect(struct drm_bridge *bridge)
+static enum drm_connector_status
+zynqmp_dp_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector)
 {
 	struct zynqmp_dp *dp = bridge_to_dp(bridge);
 

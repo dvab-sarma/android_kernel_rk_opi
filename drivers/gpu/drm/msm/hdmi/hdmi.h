@@ -223,7 +223,8 @@ int msm_hdmi_bridge_init(struct hdmi *hdmi);
 
 void msm_hdmi_hpd_irq(struct drm_bridge *bridge);
 enum drm_connector_status msm_hdmi_bridge_detect(
-		struct drm_bridge *bridge);
+	struct drm_bridge *bridge, struct drm_connector *connector);
+		//struct drm_bridge *bridge);
 int msm_hdmi_hpd_enable(struct drm_bridge *bridge);
 void msm_hdmi_hpd_disable(struct hdmi *hdmi);
 
