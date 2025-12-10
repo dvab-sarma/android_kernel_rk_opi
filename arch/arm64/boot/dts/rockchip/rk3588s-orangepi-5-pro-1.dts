@@ -75,20 +75,6 @@
 	};
 
 
-	// dp0-con {
-	// 	compatible = "dp-connector";
-	// 	label = "DP OUT";
-	// 	type = "mini";
-
-	// 	port {
-	// 		dp_con_in: endpoint {
-	// 			remote-endpoint = <&dp0_out_con>;
-	// 		};
-	// 	};
-	// };
-
-
-
     hdmi0-con {
 		compatible = "hdmi-connector";
 		type = "a";
@@ -304,7 +290,7 @@
 			gpios = <&gpio1 RK_PC2 GPIO_ACTIVE_HIGH>;
 			label = "green_led";
 			linux,default-trigger = "disk-activity";
-			//linux,default-trigger-delay-ms = <0>;
+			linux,default-trigger-delay-ms = <0>;
 		};
 		
 
@@ -343,8 +329,6 @@
 	
 	pinctrl-0 = <&dp0m0_pins>;
 	pinctrl-names = "default";
-	//hpd-gpios = <&gpio4 RK_PB4 GPIO_ACTIVE_HIGH>;
-	//pinctrl-0 = <&dp0_hpd>;	
 	status = "okay";
 };
 
@@ -364,10 +348,6 @@
 &spdif_tx2{
 	status = "okay";
 };
-
-// &dp0_out {
-
-// };
 
 &vdec0 {
     status = "okay";
@@ -870,10 +850,6 @@
 	};
 };
 
-// &display_subsystem {
-// 	clocks = <&hdptxphy_hdmi0>;
-// 	clock-names = "hdmi0_phy_pll";
-// };
 
 &cpu_l0 {
 	cpu-supply = <&vdd_cpu_lit_s0>;
@@ -1149,14 +1125,6 @@
 		wifi_host_wake_irq: wifi-host-wake-irq {
 			rockchip,pins = <0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_down>;
 		};
-		// wifi_poweren_pin: wifi-poweren-pin {
-		// 	rockchip,pins = <1 RK_PD3 RK_FUNC_GPIO &pcfg_pull_up>;
-		// };
-		// wifi_poweren_pin: wifi-poweren-pin {
-
-			
-		// 	rockchip,pins = <0 RK_PD0 RK_FUNC_GPIO &pcfg_pull_down>;
-		// };
 	};
 
 	leds_gpio {
@@ -1220,20 +1188,21 @@
 
 
 &usb_host0_xhci {
-	status = "okay";
+	
 	//dr_mode = "host";
-	dr_mode = "otg";
+	dr_mode = "host";
 	extcon = <&u2phy0>;
+	//maximum-speed = "high-speed";
+	status = "okay";
 };
 
 &usb_host2_xhci {
-	status = "okay";
+	status = "disabled";
 };
 
 
 &usbdp_phy0 {
 	status = "okay";
-	// rockchip,dp-lane-mux = <0 1>;
 	rockchip,dp-lane-mux = <0 1>;
 };
 
