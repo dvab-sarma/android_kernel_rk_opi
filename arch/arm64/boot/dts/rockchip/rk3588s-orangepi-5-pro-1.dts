@@ -202,6 +202,8 @@
 		regulator-name = "vcc5v0_otg";
 		regulator-min-microvolt = <5000000>;
 		regulator-max-microvolt = <5000000>;
+		regulator-boot-on;
+		regulator-always-on;
 		enable-active-high;
 		gpio = <&gpio0 RK_PC4 GPIO_ACTIVE_HIGH>;
 		pinctrl-names = "default";
@@ -767,9 +769,6 @@
 	pinctrl-names = "default";
 	vmmc-supply = <&vcc_3v3_s3>;
 	vqmmc-supply = <&vccio_sd_s0>;
-	//vqmmc-supply = <&vcc_1v8_s3>;
-	//pinctrl-0 = <&sdmmc_clk &sdmmc_cmd &sdmmc_det &sdmmc_bus4 &wifi_poweren_pin>;
-	//pinctrl-0 = <&sdiom1_pins &wifi_poweren_pin>;
 	pinctrl-0 = <&sdiom1_pins>;
 	sd-uhs-sdr104;
 	status = "okay";
@@ -782,7 +781,6 @@
         interrupts = <RK_PA0 GPIO_ACTIVE_HIGH>;  // From wifi_host_wake_irq
        	interrupt-names = "host-wake";
         pinctrl-names = "default";
-		//clock-names = "lpo";
         pinctrl-0 = <&wifi_host_wake_irq>;
 		status = "okay";
     };
@@ -1206,10 +1204,8 @@
 
 &usb_host0_xhci {
 	
-	//dr_mode = "host";
 	dr_mode = "host";
 	extcon = <&u2phy0>;
-	//maximum-speed = "high-speed";
 	status = "okay";
 };
 
@@ -1304,12 +1300,11 @@
     	device-wakeup-gpios = <&gpio0 RK_PC6 GPIO_ACTIVE_HIGH>;  // bt_wake_gpio
     	shutdown-gpios = <&gpio0 RK_PD5 GPIO_ACTIVE_HIGH>;  // bt_reset_gpio
     	pinctrl-names = "default";
-    	//pinctrl-0 = <&bt_reset_gpio>, <&bt_wake_gpio>, <&bt_irq_gpio>;
-		pinctrl-0 = <&bt_reset_gpio &bt_wake_gpio &bt_irq_gpio>;
+    	pinctrl-0 = <&bt_reset_gpio &bt_wake_gpio &bt_irq_gpio>;
     	vbat-supply = <&vcc_3v3_s3>;  // Optional regulator (add if available)
    		vddio-supply = <&vcc_1v8_s3>;  // Optional regulator (add if available)
     	status = "okay";
-    	//uart = <&uart9>;  // Link to your uart9 node
+    	
 	};
 
 };
