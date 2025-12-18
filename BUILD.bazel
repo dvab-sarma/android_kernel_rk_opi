@@ -1086,6 +1086,36 @@ kernel_build(
     kcflags = ["-D__ANDROID_COMMON_KERNEL__"],
 )
 
+# Orangepi 5_max support-
+kernel_build(
+    name = "opi5_max_defconfig",
+    outs = [
+        ".config",
+    ],
+    build_config = "build.config.opi5_max",
+    make_goals = [
+        "android_orangepi5_max_defconfig",
+    ],
+)
+
+kernel_build(
+    name = "opi5_max",
+    outs = [
+        "arch/arm64/boot/Image",
+        "arch/arm64/boot/dts/rockchip/rk3588-orangepi-5-max.dtb",
+
+    ],
+    build_config = "build.config.opi5_max",
+    make_goals = [
+         "Image",
+         "dtbs",
+
+    ],
+    makefile = "//common:Makefile",
+    
+    kcflags = ["-D__ANDROID_COMMON_KERNEL__"],
+)
+
 # Orangepi 5 support-
 kernel_build(
     name = "opi5_defconfig",
