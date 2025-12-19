@@ -27,15 +27,12 @@
 #include "rkvdec-rcb.h"
 #include "rkvdec.h"
 #include "rkvdec-vdpu381-regs.h"
+#include "rkvdec-vp9-common.h"
 
 
 #define RKVDEC_VP9_PROBE_SIZE      4864
-//#define RKVDEC_VP9_COUNT_SIZE      13232
 #define RKVDEC_VP9_COUNT_SIZE      13208
-
-
 #define RKVDEC_VP9_MAX_SEGMAP_SIZE 73728
-//#define RKVDEC_VP9_MAX_SEGMAP_SIZE 294912
 
 
 
@@ -147,11 +144,6 @@ struct rkvdec_vp9_intra_frame_symbol_counts {
 	struct rkvdec_vp9_refs_counts ref_cnt[2][4][2][6][6];
 };
 
-struct rkvdec_vp9_run {
-	struct rkvdec_run base;
-	const struct v4l2_ctrl_vp9_frame *decode_params;
-};
-
 struct rkvdec_vp9_frame_info {
 	u32 valid : 1;
 	u32 segmapid : 1;
@@ -176,27 +168,6 @@ struct rkvdec_vp9_ctx {
 	struct rkvdec_vp9_frame_info last;
 	struct rkvdec_vdpu381_regs_vp9 regs;
 };
-
-static void write_coeff_plane(const u8 coef[6][6][3], u8 *coeff_plane)
-{
-	unsigned int idx = 0, byte_count = 0;
-	int k, m, n;
-	u8 p;
-
-	for (k = 0; k < 6; k++) {
-		for (m = 0; m < 6; m++) {
-			for (n = 0; n < 3; n++) {
-				p = coef[k][m][n];
-				coeff_plane[idx++] = p;
-				byte_count++;
-				if (byte_count == 27) {
-					idx += 5;
-					byte_count = 0;
-				}
-			}
-		}
-	}
-}
 
 static void init_intra_only_probs(struct rkvdec_ctx *ctx,
 				  const struct rkvdec_vp9_run *run)
@@ -247,7 +218,6 @@ static void init_intra_only_probs(struct rkvdec_ctx *ctx,
 		rkprobs->intra_mode[i / 23].uv_mode[i % 23] = ptr[i];
 	}
 }
-
 
 static void init_inter_probs(struct rkvdec_ctx *ctx,
 			     const struct rkvdec_vp9_run *run)
@@ -320,7 +290,6 @@ static void init_inter_probs(struct rkvdec_ctx *ctx,
 	       sizeof(rkprobs->mv.hp));
 }
 
-
 static void init_probs(struct rkvdec_ctx *ctx,
 		       const struct rkvdec_vp9_run *run)
 {
@@ -354,51 +323,12 @@ static void init_probs(struct rkvdec_ctx *ctx,
 	memcpy(rkprobs->tx16, probs->tx16, sizeof(rkprobs->tx16));
 	memcpy(rkprobs->tx8, probs->tx8, sizeof(rkprobs->tx8));
 	memcpy(rkprobs->is_inter, probs->is_inter, sizeof(rkprobs->is_inter));
-    //dev_err(ctx->dev->dev, "iommu error. here : 1\n");
+    
 	if (intra_only)
 		init_intra_only_probs(ctx, run);
 	else
 		init_inter_probs(ctx, run);
 }
-
-static struct rkvdec_decoded_buffer *
-get_ref_buf(struct rkvdec_ctx *ctx, struct vb2_v4l2_buffer *dst, u64 timestamp)
-{
-	struct v4l2_m2m_ctx *m2m_ctx = ctx->fh.m2m_ctx;
-	struct vb2_queue *cap_q = &m2m_ctx->cap_q_ctx.q;
-	struct vb2_buffer *buf;
-
-	/*
-	 * If a ref is unused or invalid, address of current destination
-	 * buffer is returned.
-	 */
-	buf = vb2_find_buffer(cap_q, timestamp);
-	if (!buf)
-		buf = &dst->vb2_buf;
-
-	return vb2_to_rkvdec_decoded_buf(buf);
-}
-
-static dma_addr_t get_mv_base_addr(struct rkvdec_decoded_buffer *buf, struct rkvdec_ctx *ctx)
-{
-	unsigned int aligned_pitch, aligned_height, yuv_len;
-
-	aligned_height = round_up(buf->vp9.height, 64);
-	aligned_pitch = round_up(buf->vp9.width * buf->vp9.bit_depth, 512) / 8;
-	yuv_len = (aligned_height * aligned_pitch * 3) / 2;
-
-    //dev_err(ctx->dev->dev, "iommu error. here : get_mv_addr\n");
-
-    if((vb2_dma_contig_plane_dma_addr(&buf->base.vb.vb2_buf, 0) +
-	       yuv_len) < 0) {
-        //dev_err(ctx->dev->dev, "iommu error. here : get_mv_addr <less than 0\n");
-
-           }
-
-	return vb2_dma_contig_plane_dma_addr(&buf->base.vb.vb2_buf, 0) +
-	       yuv_len;
-}
-
 
 static void config_ref_registers(struct rkvdec_ctx *ctx,
 				 const struct rkvdec_vp9_run *run,
@@ -462,10 +392,6 @@ static void config_ref_registers(struct rkvdec_ctx *ctx,
             regs->vp9_param.reg87.vp9_altrefy_virstride = y_len / 16;                        
             break;
     }
-    //dev_err(ctx->dev->dev, "iommu error. here : 3\n"); 
-    //couldn't find in the register mapping
-	// if (!i)
-	// 	regs->vp9.reg51.lastref_yuv_virstride = yuv_len / 16;
 }
 
 static void config_seg_registers(struct rkvdec_ctx *ctx, unsigned int segid)
@@ -504,17 +430,8 @@ static void config_seg_registers(struct rkvdec_ctx *ctx, unsigned int segid)
 
 	regs->vp9_param.reg67_74[segid].vp9_segid_abs_delta = !segid &&
 		(seg->flags & V4L2_VP9_SEGMENTATION_FLAG_ABS_OR_DELTA_UPDATE);
-    //dev_err(ctx->dev->dev, "iommu error. here : 4\n");
+    
 }
-
-static void update_dec_buf_info(struct rkvdec_decoded_buffer *buf,
-				const struct v4l2_ctrl_vp9_frame *dec_params)
-{
-	buf->vp9.width = dec_params->frame_width_minus_1 + 1;
-	buf->vp9.height = dec_params->frame_height_minus_1 + 1;
-	buf->vp9.bit_depth = dec_params->bit_depth;
-}
-
 
 static void update_ctx_cur_info(struct rkvdec_vp9_ctx *vp9_ctx,
 				struct rkvdec_decoded_buffer *buf,
@@ -550,8 +467,7 @@ static void rkvdec_write_regs(struct rkvdec_ctx *ctx)
 			   sizeof(vp9_ctx->regs.common_addr));
 	rkvdec_memcpy_toio(rkvdec->regs + OFFSET_CODEC_ADDR_REGS,
 			   &vp9_ctx->regs.vp9_addr,
-			   sizeof(vp9_ctx->regs.vp9_addr));
-    //dev_err(ctx->dev->dev, "iommu error. here : 5\n");
+			   sizeof(vp9_ctx->regs.vp9_addr));    
 
 }
 
@@ -567,21 +483,20 @@ static void config_registers(struct rkvdec_ctx *ctx,
 	u32 val;
 	const struct v4l2_vp9_segmentation *seg;
     u32 pixels;
-	//struct rkvdec_dev *rkvdec = ctx->dev;
-	dma_addr_t addr, rlc_addr, dst_addr;
+	
+	dma_addr_t rlc_addr, dst_addr;
 	bool intra_only;
 	unsigned int i;
 
-    // memset(regs, 0, sizeof(*regs));
-
+    
 	dec_params = run->decode_params;
 	dst = vb2_to_rkvdec_decoded_buf(&run->base.bufs.dst->vb2_buf);
-	ref_bufs[0] = get_ref_buf(ctx, &dst->base.vb, dec_params->last_frame_ts);
-	ref_bufs[1] = get_ref_buf(ctx, &dst->base.vb, dec_params->golden_frame_ts);
-	ref_bufs[2] = get_ref_buf(ctx, &dst->base.vb, dec_params->alt_frame_ts);
+	ref_bufs[0] = get_ref_buf_vp9(ctx, &dst->base.vb, dec_params->last_frame_ts);
+	ref_bufs[1] = get_ref_buf_vp9(ctx, &dst->base.vb, dec_params->golden_frame_ts);
+	ref_bufs[2] = get_ref_buf_vp9(ctx, &dst->base.vb, dec_params->alt_frame_ts);
 
 	if (vp9_ctx->last.valid)
-		last = get_ref_buf(ctx, &dst->base.vb, vp9_ctx->last.timestamp);
+		last = get_ref_buf_vp9(ctx, &dst->base.vb, vp9_ctx->last.timestamp);
 	else
 		last = dst;
 
@@ -594,14 +509,14 @@ static void config_registers(struct rkvdec_ctx *ctx,
 			 V4L2_VP9_FRAME_FLAG_INTRA_ONLY));
 
 	regs->common.reg009.dec_mode = VDPU381_MODE_VP9;
-    //added after green screen error
+    
     regs->vp9_param.reg103.vp9_intra_only_flag = intra_only;
 
     /* Set config */
 	regs->common.reg011.buf_empty_en = 1;
 	regs->common.reg011.dec_clkgate_e = 1;
 	regs->common.reg011.dec_timeout_e = 1;
-	//regs->common.reg011.pix_range_detection_e = 1;
+	
 
 	bit_depth = dec_params->bit_depth;
     aligned_height = round_up(ctx->decoded_fmt.fmt.pix_mp.height, 64);
@@ -618,17 +533,13 @@ static void config_registers(struct rkvdec_ctx *ctx,
 	regs->common.reg018.y_hor_virstride = aligned_pitch / 16;
 	regs->common.reg019.uv_hor_virstride = aligned_pitch / 16;
 	regs->common.reg020.y_virstride = y_len / 16;
-    // not found in register mappings
-	//regs->common.reg09.yuv_virstride = yuv_len / 16;
+
 
 	stream_len = vb2_get_plane_payload(&run->base.bufs.src->vb2_buf, 0);
 
 	regs->common.stream_len = stream_len;
 
-
-
-    // testing, could see pixels but damaged
-        /* Activate block gating */
+    /* Activate block gating */
 	regs->common.reg026.swreg_block_gating_e = 0xfffef;
 	regs->common.reg026.reg_cfg_gating_en = 1;
 
@@ -641,8 +552,6 @@ static void config_registers(struct rkvdec_ctx *ctx,
 		regs->common.timeout_threshold = RKVDEC_TIMEOUT_8K;
     else
 		regs->common.timeout_threshold = RKVDEC_TIMEOUT_MAX;
-
-
 
 	/*
 	 * Reset count buffer, because decoder only output intra related syntax
@@ -670,20 +579,17 @@ static void config_registers(struct rkvdec_ctx *ctx,
 
 	if (!intra_only) {
 		const struct v4l2_vp9_loop_filter *lf;
-		s8 delta;
+		// s8 delta;
 
 		if (vp9_ctx->last.valid)
 			lf = &vp9_ctx->last.lf;
 		else
 			lf = &vp9_ctx->cur.lf;
 
-		val = 0;
-      
+		val = 0;      
 
-        for (i = 0; i < ARRAY_SIZE(lf->ref_deltas); i++) {
-        
+        for (i = 0; i < ARRAY_SIZE(lf->ref_deltas); i++) {        
             regs->vp9_param.reg94.vp9_ref_deltas_lastframe |= (lf->ref_deltas[i] & 0x7f) << (7 * i); 
-
         }         
 
         for(i = 0; i < ARRAY_SIZE(lf->mode_deltas); i++){
@@ -748,16 +654,14 @@ static void config_registers(struct rkvdec_ctx *ctx,
 	dst_addr = vb2_dma_contig_plane_dma_addr(&dst->base.vb.vb2_buf, 0);
 	regs->common_addr.decout_base = dst_addr;
     regs->common_addr.error_ref_base = dst_addr;
-    /* Set colmv address */ //  previous this was addr but with rlc_addr by mistake , so rearranged everything such that colmv_cur_base be dst_addr not rlc_addr
+
+    /* Set colmv address */ 
 	regs->common_addr.colmv_cur_base = dst_addr + ctx->colmv_offset;
 
     /* Set RCB addresses */
 	for (i = 0; i < rkvdec_rcb_buf_count(ctx); i++)
 		regs->common_addr.rcb_base[i] = rkvdec_rcb_buf_dma_addr(ctx, i);
-
-
-
-    // testing, could see pixels but damaged
+    
 	regs->vp9_addr.cabactbl_base = vp9_ctx->priv_tbl.dma +
 		offsetof(struct rkvdec_vp9_priv_tbl, probs);
 
@@ -778,11 +682,9 @@ static void config_registers(struct rkvdec_ctx *ctx,
 	else
 		mv_ref = dst;
 
-	regs->vp9_addr.vp9_refcolmv_base = get_mv_base_addr(mv_ref,ctx);
-    
+	regs->vp9_addr.vp9_refcolmv_base = get_mv_base_addr(mv_ref);   
 
-    rkvdec_write_regs(ctx);
-    //dev_err(ctx->dev->dev, "iommu error. here : 6\n");
+    rkvdec_write_regs(ctx);   
 
 }
 
@@ -894,50 +796,40 @@ static int rkvdec_vp9_run_preamble(struct rkvdec_ctx *ctx,
 static int rkvdec_vp9_run(struct rkvdec_ctx *ctx)
 {
 	struct rkvdec_dev *rkvdec = ctx->dev;
-    struct rkvdec_vp9_ctx *vp9_ctx = ctx->priv;
-	//struct rkvdec_vp9_run run = { };
+    struct rkvdec_vp9_ctx *vp9_ctx = ctx->priv;	
 	struct rkvdec_vp9_run run = { };
 	int ret;
-
     u32 watchdog_time;
 
-	ret = rkvdec_vp9_run_preamble(ctx, &run);
-    //dev_err(ctx->dev->dev, "iommu error. here : 7.1\n");
+	ret = rkvdec_vp9_run_preamble(ctx, &run); 
 
 	if (ret) {
-		rkvdec_run_postamble(ctx, &run.base);
-        //dev_err(ctx->dev->dev, "iommu error. here : 7.2\n");
+		rkvdec_run_postamble(ctx, &run.base);      
 
 		return ret;
 	}
 
 	/* Prepare probs. */
 	init_probs(ctx, &run);
-    //dev_err(ctx->dev->dev, "iommu error. here : 7.3\n");
-
 
 	/* Configure hardware registers. */
 	config_registers(ctx, &run);
-    //dev_err(ctx->dev->dev, "iommu error. here : 7.4\n");
-
 
 	rkvdec_run_postamble(ctx, &run.base);
-    //dev_err(ctx->dev->dev, "iommu error. here : 7.5\n");
-
 
     u64 timeout_threshold = vp9_ctx->regs.common.timeout_threshold;
     unsigned long axi_rate = clk_get_rate(rkvdec->axi_clk);
 
-    if(axi_rate)
-        watchdog_time = 2 * (1000 * timeout_threshold) / axi_rate;
-    else
-        watchdog_time = 2000;
-	schedule_delayed_work(&rkvdec->watchdog_work, msecs_to_jiffies(watchdog_time));
-    //dev_err(ctx->dev->dev, "iommu error. here : 7.6\n");
+	if (axi_rate) {
+    	watchdog_time = 2 * (1000 * timeout_threshold) / axi_rate;
+	} else {
+    	watchdog_time = 2000;
+	}
 
+	schedule_delayed_work(&rkvdec->watchdog_work,
+                      msecs_to_jiffies(watchdog_time));
 
     writel(VDPU381_DEC_E_BIT, rkvdec->regs + VDPU381_REG_DEC_E);
-    //dev_err(ctx->dev->dev, "iommu error. here : 7\n");
 
 	return 0;
 }
@@ -1029,8 +921,7 @@ static void rkvdec_vp9_done(struct rkvdec_ctx *ctx,
 
 	/* 6.1.2 refresh_probs(): save_probs(fctx_idx) */
 	vp9_ctx->frame_context[fctx_idx] = vp9_ctx->probability_tables;
-    //dev_err(ctx->dev->dev, "iommu error. here : 8\n");
-
+    
 out_update_last:
 	update_ctx_last_info(vp9_ctx);
 }
@@ -1146,8 +1037,7 @@ static int rkvdec_vp9_start(struct rkvdec_ctx *ctx)
 	vp9_ctx->count_tbl.size = RKVDEC_VP9_COUNT_SIZE;
 	vp9_ctx->count_tbl.cpu = count_tbl;
 	rkvdec_init_v4l2_vp9_count_tbl(ctx);
-    //dev_err(ctx->dev->dev, "iommu error. here : 9\n");
-
+    
 	return 0;
 
 err_free_priv_tbl:
@@ -1166,11 +1056,10 @@ static void rkvdec_vp9_stop(struct rkvdec_ctx *ctx)
 
 	dma_free_coherent(rkvdec->dev, vp9_ctx->count_tbl.size,
 			  vp9_ctx->count_tbl.cpu, vp9_ctx->count_tbl.dma);
-    //dev_err(ctx->dev->dev, "iommu error. here : 10\n");
-
+    
 	dma_free_coherent(rkvdec->dev, vp9_ctx->priv_tbl.size,
 			  vp9_ctx->priv_tbl.cpu, vp9_ctx->priv_tbl.dma);
-    //dev_err(ctx->dev->dev, "iommu error. here : 11\n");
+    
 	kfree(vp9_ctx);
 
 }
@@ -1185,7 +1074,6 @@ static int rkvdec_vp9_adjust_fmt(struct rkvdec_ctx *ctx,
 		fmt->plane_fmt[0].sizeimage = fmt->width * fmt->height * 2;
 	return 0;
 }
-
 
 
 const struct rkvdec_coded_fmt_ops rkvdec_vdpu381_vp9_fmt_ops = {

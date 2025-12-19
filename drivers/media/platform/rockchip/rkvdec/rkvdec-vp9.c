@@ -23,6 +23,7 @@
 
 #include "rkvdec.h"
 #include "rkvdec-regs.h"
+#include "rkvdec-vp9-common.h"
 
 #define RKVDEC_VP9_PROBE_SIZE		4864
 #define RKVDEC_VP9_COUNT_SIZE		13232
@@ -136,11 +137,6 @@ struct rkvdec_vp9_intra_frame_symbol_counts {
 	struct rkvdec_vp9_refs_counts ref_cnt[2][4][2][6][6];
 };
 
-struct rkvdec_vp9_run {
-	struct rkvdec_run base;
-	const struct v4l2_ctrl_vp9_frame *decode_params;
-};
-
 struct rkvdec_vp9_frame_info {
 	u32 valid : 1;
 	u32 segmapid : 1;
@@ -165,27 +161,6 @@ struct rkvdec_vp9_ctx {
 	struct rkvdec_vp9_frame_info last;
 	struct rkvdec_regs regs;
 };
-
-static void write_coeff_plane(const u8 coef[6][6][3], u8 *coeff_plane)
-{
-	unsigned int idx = 0, byte_count = 0;
-	int k, m, n;
-	u8 p;
-
-	for (k = 0; k < 6; k++) {
-		for (m = 0; m < 6; m++) {
-			for (n = 0; n < 3; n++) {
-				p = coef[k][m][n];
-				coeff_plane[idx++] = p;
-				byte_count++;
-				if (byte_count == 27) {
-					idx += 5;
-					byte_count = 0;
-				}
-			}
-		}
-	}
-}
 
 static void init_intra_only_probs(struct rkvdec_ctx *ctx,
 				  const struct rkvdec_vp9_run *run)
@@ -348,36 +323,6 @@ static void init_probs(struct rkvdec_ctx *ctx,
 		init_inter_probs(ctx, run);
 }
 
-static struct rkvdec_decoded_buffer *
-get_ref_buf(struct rkvdec_ctx *ctx, struct vb2_v4l2_buffer *dst, u64 timestamp)
-{
-	struct v4l2_m2m_ctx *m2m_ctx = ctx->fh.m2m_ctx;
-	struct vb2_queue *cap_q = &m2m_ctx->cap_q_ctx.q;
-	struct vb2_buffer *buf;
-
-	/*
-	 * If a ref is unused or invalid, address of current destination
-	 * buffer is returned.
-	 */
-	buf = vb2_find_buffer(cap_q, timestamp);
-	if (!buf)
-		buf = &dst->vb2_buf;
-
-	return vb2_to_rkvdec_decoded_buf(buf);
-}
-
-static dma_addr_t get_mv_base_addr(struct rkvdec_decoded_buffer *buf)
-{
-	unsigned int aligned_pitch, aligned_height, yuv_len;
-
-	aligned_height = round_up(buf->vp9.height, 64);
-	aligned_pitch = round_up(buf->vp9.width * buf->vp9.bit_depth, 512) / 8;
-	yuv_len = (aligned_height * aligned_pitch * 3) / 2;
-
-	return vb2_dma_contig_plane_dma_addr(&buf->base.vb.vb2_buf, 0) +
-	       yuv_len;
-}
-
 static void config_ref_registers(struct rkvdec_ctx *ctx,
 				 const struct rkvdec_vp9_run *run,
 				 struct rkvdec_decoded_buffer *ref_buf,
@@ -446,14 +391,6 @@ static void config_seg_registers(struct rkvdec_ctx *ctx, unsigned int segid)
 		(seg->flags & V4L2_VP9_SEGMENTATION_FLAG_ABS_OR_DELTA_UPDATE);
 }
 
-static void update_dec_buf_info(struct rkvdec_decoded_buffer *buf,
-				const struct v4l2_ctrl_vp9_frame *dec_params)
-{
-	buf->vp9.width = dec_params->frame_width_minus_1 + 1;
-	buf->vp9.height = dec_params->frame_height_minus_1 + 1;
-	buf->vp9.bit_depth = dec_params->bit_depth;
-}
-
 static void update_ctx_cur_info(struct rkvdec_vp9_ctx *vp9_ctx,
 				struct rkvdec_decoded_buffer *buf,
 				const struct v4l2_ctrl_vp9_frame *dec_params)
@@ -490,12 +427,12 @@ static void config_registers(struct rkvdec_ctx *ctx,
 
 	dec_params = run->decode_params;
 	dst = vb2_to_rkvdec_decoded_buf(&run->base.bufs.dst->vb2_buf);
-	ref_bufs[0] = get_ref_buf(ctx, &dst->base.vb, dec_params->last_frame_ts);
-	ref_bufs[1] = get_ref_buf(ctx, &dst->base.vb, dec_params->golden_frame_ts);
-	ref_bufs[2] = get_ref_buf(ctx, &dst->base.vb, dec_params->alt_frame_ts);
+	ref_bufs[0] = get_ref_buf_vp9(ctx, &dst->base.vb, dec_params->last_frame_ts);
+	ref_bufs[1] = get_ref_buf_vp9(ctx, &dst->base.vb, dec_params->golden_frame_ts);
+	ref_bufs[2] = get_ref_buf_vp9(ctx, &dst->base.vb, dec_params->alt_frame_ts);
 
 	if (vp9_ctx->last.valid)
-		last = get_ref_buf(ctx, &dst->base.vb, vp9_ctx->last.timestamp);
+		last = get_ref_buf_vp9(ctx, &dst->base.vb, vp9_ctx->last.timestamp);
 	else
 		last = dst;
 
@@ -893,7 +830,7 @@ static void rkvdec_vp9_done(struct rkvdec_ctx *ctx,
 out_update_last:
 	update_ctx_last_info(vp9_ctx);
 }
-
+//common - done
 static void rkvdec_init_v4l2_vp9_count_tbl(struct rkvdec_ctx *ctx)
 {
 	struct rkvdec_vp9_ctx *vp9_ctx = ctx->priv;

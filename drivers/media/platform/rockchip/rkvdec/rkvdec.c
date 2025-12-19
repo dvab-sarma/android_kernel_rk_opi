@@ -1462,21 +1462,18 @@ static irqreturn_t vdpu381_irq_handler(struct rkvdec_ctx *ctx)
 		state = VB2_BUF_STATE_ERROR;
 		if (status & (VDPU381_STA_INT_SOFTRESET_RDY |
 			      VDPU381_STA_INT_TIMEOUT |
-			      VDPU381_STA_INT_ERROR))
-    		//dev_err(ctx->dev->dev, "iommu error. here : 16\n");			
+			      VDPU381_STA_INT_ERROR))    					
 			rkvdec_iommu_restore(rkvdec);
 	}
 
-	if (need_reset){
-		//dev_err(ctx->dev->dev, "iommu error. here : 14\n");
+	if (need_reset){		
 		rkvdec_iommu_restore(rkvdec);
 	}
 
 
 
 	if (cancel_delayed_work(&rkvdec->watchdog_work))
-    	//dev_err(ctx->dev->dev, "iommu error. here : 15\n");
-		rkvdec_job_finish(ctx, state);
+    	rkvdec_job_finish(ctx, state);
 
 	return IRQ_HANDLED;
 }
