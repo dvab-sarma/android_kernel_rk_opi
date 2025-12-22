@@ -43,7 +43,7 @@ MODULE_NAME := bcmdhd
 CONFIG_AP6XXX ?= m
 
 #CONFIG_BCMDHD_SDIO := y
-#CONFIG_BCMDHD_PCIE := y
+#CONFIG_BCMDHD_PCIE := n
 #CONFIG_BCMDHD_USB := y
 
 CONFIG_BCMDHD_OOB := y
@@ -69,6 +69,8 @@ CONFIG_BCMDHD_TPUT := y
 
 CONFIG_MACH_PLATFORM := y
 #CONFIG_BCMDHD_DTS := y
+
+
 
 DHDCFLAGS = -Wall -Wstrict-prototypes -Wno-date-time -Wno-strict-prototypes   \
 	-Wno-uninitialized -Wno-unused-but-set-variable -Wno-address	      \
@@ -96,7 +98,9 @@ DHDOFILES = aiutils.o siutils.o sbutils.o                                 \
 	dhd_linux_exportfs.o dhd_linux_pktdump.o dhd_mschdbg.o linuxerrmap.o  \
 	dhd_linux_tx.o dhd_linux_rx.o fwpkg_utils.o                           \
 	dhd_config.o dhd_ccode.o wl_event.o wl_android_ext.o                  \
-	wl_iapsta.o wl_escan.o wl_timer.o
+	wl_iapsta.o wl_escan.o wl_timer.o \
+	lib80211_crypto.o lib80211_crypto_ccmp.o lib80211_crypto_tkip.o \
+	lib80211_crypto_wep.o
 
 ifneq ($(CONFIG_WIRELESS_EXT),)
 	DHDOFILES += wl_iw.o

@@ -81,7 +81,7 @@
 #endif /* ENABLE_ADAPTIVE_SCHED */
 #include <linux/rtc.h>
 #include <asm/uaccess.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <dhd_linux_priv.h>
 #ifdef BCMPCIE
 #if defined(CUSTOMER_HW_ROCKCHIP) && defined(CONFIG_PCIEASPM_ROCKCHIP_WIFI_EXTENSION)
@@ -511,15 +511,15 @@ char config_path[MOD_PARAM_PATHLEN];
 #else
 char firmware_path[MOD_PARAM_PATHLEN] = CONFIG_BCMDHD_FW_PATH;
 char nvram_path[MOD_PARAM_PATHLEN] = CONFIG_BCMDHD_NVRAM_PATH;
-char clm_path[MOD_PARAM_PATHLEN];
-char config_path[MOD_PARAM_PATHLEN];
+char clm_path[MOD_PARAM_PATHLEN] = CONFIG_BCMDHD_CLM_PATH;
+char config_path[MOD_PARAM_PATHLEN] = CONFIG_BCMDHD_CONFIG_PATH;
 #endif /* DHD_LINUX_STD_FW_API */
 char signature_path[MOD_PARAM_PATHLEN];
 #ifdef DHD_UCODE_DOWNLOAD
 char ucode_path[MOD_PARAM_PATHLEN];
 #endif /* DHD_UCODE_DOWNLOAD */
 
-module_param_string(clm_path, clm_path, MOD_PARAM_PATHLEN, 0660);
+module_param_string(clm_path, clm_path, MOD_PARAM_PATHLEN, 0664);
 
 /* backup buffer for firmware and nvram path */
 char fw_bak_path[MOD_PARAM_PATHLEN];
@@ -531,7 +531,7 @@ module_param_string(info_string, info_string, MOD_PARAM_INFOLEN, 0444);
 
 #ifdef SYNA_SAR_CUSTOMER_PARAMETER
 char config_sar_path[MOD_PARAM_PATHLEN] = CONFIG_BCMDHD_CONFIG_SAR_PATH;
-module_param_string(config_sar_path, config_sar_path, MOD_PARAM_PATHLEN, 0660);
+module_param_string(config_sar_path, config_sar_path, MOD_PARAM_PATHLEN, 0664);
 #endif /* SYNA_SAR_CUSTOMER_PARAMETER */
 int op_mode = 0;
 int disable_proptx = 0;
@@ -611,12 +611,12 @@ module_param(dhd_arp_mode, uint, 0);
 /* Disable Prop tx */
 module_param(disable_proptx, int, 0644);
 /* load firmware and/or nvram values from the filesystem */
-module_param_string(firmware_path, firmware_path, MOD_PARAM_PATHLEN, 0660);
-module_param_string(nvram_path, nvram_path, MOD_PARAM_PATHLEN, 0660);
-module_param_string(config_path, config_path, MOD_PARAM_PATHLEN, 0);
-module_param_string(signature_path, signature_path, MOD_PARAM_PATHLEN, 0660);
+module_param_string(firmware_path, firmware_path, MOD_PARAM_PATHLEN, 0664);
+module_param_string(nvram_path, nvram_path, MOD_PARAM_PATHLEN, 0664);
+module_param_string(config_path, config_path, MOD_PARAM_PATHLEN, 0664);
+module_param_string(signature_path, signature_path, MOD_PARAM_PATHLEN, 0664);
 #ifdef DHD_UCODE_DOWNLOAD
-module_param_string(ucode_path, ucode_path, MOD_PARAM_PATHLEN, 0660);
+module_param_string(ucode_path, ucode_path, MOD_PARAM_PATHLEN, 0664);
 #endif /* DHD_UCODE_DOWNLOAD */
 
 /* wl event forwarding */
@@ -22422,7 +22422,7 @@ dhd_print_kirqstats(dhd_pub_t *dhd, unsigned int irq_num)
 	bcm_bprintf(&strbuf, "dhd irq %u:", irq_num);
 	for_each_online_cpu(i)
 		bcm_bprintf(&strbuf, "%10u ",
-			desc->kstat_irqs ? *per_cpu_ptr(desc->kstat_irqs, i) : 0);
+			desc->kstat_irqs ? per_cpu_ptr(desc->kstat_irqs, i)->cnt : 0);
 	if (desc->irq_data.chip) {
 		if (desc->irq_data.chip->name)
 			bcm_bprintf(&strbuf, " %8s", desc->irq_data.chip->name);
