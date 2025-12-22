@@ -1251,6 +1251,46 @@ pkg_install(
     destdir = "out/yukawa/dist",
 )
 
+# Rockchip rk3588(s) - OrangePi 5 Pro (and siblings) build config
+kernel_build(
+    name = "opi5_pro",
+    outs = [
+        "arch/arm64/boot/Image",
+        "arch/arm64/boot/dts/rockchip/rk3588s-orangepi-5-pro-1.dtb",
+        "arch/arm64/boot/dts/rockchip/rk3588s-orangepi-5b.dtb",
+        "arch/arm64/boot/dts/rockchip/rk3588s-orangepi-5.dtb",
+        "arch/arm64/boot/dts/rockchip/rk3588-orangepi-5-max.dtb",
+        "arch/arm64/boot/dts/rockchip/rk3588-orangepi-5-plus.dtb",
+        "arch/arm64/boot/dts/rockchip/rk3588-orangepi-5-ultra.dtb"
+    ],
+    arch = "arm64",
+    defconfig = "arch/arm64/configs/android_orangepi5_defconfig",
+    make_goals = [
+         "Image",
+         "dtbs",         
+    ],
+    check_defconfig = "disabled",
+    makefile = ":Makefile",
+)
+
+# Rockchip rk3566 - OrangePi 3b v2.1 (and siblings) build config
+kernel_build(
+    name = "opi3b",
+    outs = [
+        "arch/arm64/boot/Image",
+        "arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1.dtb",
+        "arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v1.1.dtb",
+    ],
+    arch = "arm64",
+    defconfig = "arch/arm64/configs/android_orangepi5_defconfig",
+    make_goals = [
+         "Image",
+         "dtbs",         
+    ],
+    check_defconfig = "disabled",
+    makefile = ":Makefile",
+)
+
 # allmodconfig build tests.
 # These are build tests only, so:
 # - outs are intentionally set to empty to not copy anything to DIST_DIR
