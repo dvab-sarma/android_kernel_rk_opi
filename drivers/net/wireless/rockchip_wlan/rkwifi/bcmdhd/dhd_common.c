@@ -8821,7 +8821,7 @@ dhd_apply_default_clm(dhd_pub_t *dhd, char *clm_path)
 		clm_blob_path = clm_path;
 		DHD_TRACE(("clm path from module param:%s\n", clm_path));
 	} else {
-#ifdef DHD_LINUX_STD_FW_API
+#if 0 //defined(DHD_LINUX_STD_FW_API)
 		clm_blob_path = DHD_CLM_NAME;
 #else
 		clm_blob_path = VENDOR_PATH CONFIG_BCMDHD_CLM_PATH;

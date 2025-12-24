@@ -455,10 +455,11 @@ endif
 ifeq ($(CONFIG_BCMDHD_REQUEST_FW),y)
 	DHDCFLAGS += -DDHD_LINUX_STD_FW_API
 	DHDCFLAGS += -DDHD_REQUEST_FW_PATH
-	DHDCFLAGS += -DDHD_FW_NAME="\"fw_bcmdhd.bin\""
-	DHDCFLAGS += -DDHD_NVRAM_NAME="\"nvram.txt\""
-	DHDCFLAGS += -DDHD_CLM_NAME="\"clm_bcmdhd.blob\""
-	DHDCFLAGS += -DDHD_CONFIG_NAME="\"config.txt\""
+# NOTE: Disabling this. We want to use request_firmware api, but still use the config paths */
+#	DHDCFLAGS += -DDHD_FW_NAME="\"fw_bcmdhd.bin\""
+#	DHDCFLAGS += -DDHD_NVRAM_NAME="\"nvram.txt\""
+#	DHDCFLAGS += -DDHD_CLM_NAME="\"clm_bcmdhd.blob\""
+#	DHDCFLAGS += -DDHD_CONFIG_NAME="\"config.txt\""
 else
 	DHDCFLAGS += -DDHD_SUPPORT_VFS_CALL
 ifeq ($(CONFIG_BCMDHD_FW_PATH),)

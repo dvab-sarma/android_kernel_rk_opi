@@ -503,7 +503,8 @@ uint dhd_download_fw_on_driverload = TRUE;
 /* Definitions to provide path to the firmware and nvram
  * example nvram_path[MOD_PARAM_PATHLEN]="/projects/wlan/nvram.txt"
  */
-#ifdef DHD_LINUX_STD_FW_API
+ /* NOTE: Disabling this. We want to use request_firmware api, but still use the config paths */
+#if 0 && defined(DHD_LINUX_STD_FW_API)
 char firmware_path[MOD_PARAM_PATHLEN] = DHD_FW_NAME;
 char nvram_path[MOD_PARAM_PATHLEN] = DHD_NVRAM_NAME;
 char clm_path[MOD_PARAM_PATHLEN];
@@ -9946,7 +9947,8 @@ bool dhd_update_fw_nv_path(dhd_info_t *dhdinfo)
 
 	/* set default firmware and nvram path for built-in type driver */
 //	if (!dhd_download_fw_on_driverload) {
-#ifdef DHD_LINUX_STD_FW_API
+/* NOTE: Disabling this. We want to use request_firmware api, but still use the config paths */
+#if 0 && defined(DHD_LINUX_STD_FW_API)
 		fw = DHD_FW_NAME;
 		nv = DHD_NVRAM_NAME;
 #else

@@ -36,6 +36,12 @@ config PCIEASPM_ROCKCHIP_WIFI_EXTENSION
 	help
 	  This enables the extensions APIs for ASPM control.
 
+config BCMDHD_REQUEST_FW 
+	bool "Request Firmware"
+	depends on BCMDHD
+	help
+	  Requests firmware using request_firmware api
+
 config BCMDHD_FW_PATH
 	depends on BCMDHD
 	string "Firmware path"
