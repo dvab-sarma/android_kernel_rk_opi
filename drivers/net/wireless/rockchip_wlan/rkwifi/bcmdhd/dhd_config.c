@@ -1194,6 +1194,7 @@ dhd_conf_add_filepath(dhd_pub_t *dhd, char *pFilename)
 {
 	char path[WLC_IOCTL_SMLEN];
 	char *name_ptr, *module_name = NULL;
+	int len;
 
 	if (strlen(pFilename)) {
 		name_ptr = path;
@@ -1209,7 +1210,10 @@ dhd_conf_add_filepath(dhd_pub_t *dhd, char *pFilename)
 			strcat(name_ptr, "/");
 			strcat(name_ptr, module_name);
 		}
-		strcat(name_ptr, "/");
+		/* add '/' if needed */
+		if ((len = strlen(name_ptr)) > 0 && name_ptr[len - 1] != '/') {
+			strcat(name_ptr, "/");
+		}
 		strcat(name_ptr, pFilename);
 		strcpy(pFilename, path);
 	}
@@ -1224,7 +1228,8 @@ dhd_conf_set_path_params(dhd_pub_t *dhd, char *fw_path, char *nv_path)
 	/* External conf takes precedence if specified */
 	dhd_conf_preinit(dhd);
 
-#ifdef DHD_REQUEST_FW_PATH
+	/* Disabling to allow use of paths in CONFIG_EXTRA_FIRMWARE */
+#if 0 && defined(DHD_REQUEST_FW_PATH)
 	// preprocess the filename to only left 'name'
 	dhd_conf_get_filename(fw_path);
 	dhd_conf_get_filename(nv_path);

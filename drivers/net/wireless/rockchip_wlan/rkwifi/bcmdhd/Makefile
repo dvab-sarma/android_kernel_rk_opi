@@ -43,7 +43,7 @@ MODULE_NAME := bcmdhd
 CONFIG_AP6XXX ?= m
 
 #CONFIG_BCMDHD_SDIO := y
-#CONFIG_BCMDHD_PCIE := y
+#CONFIG_BCMDHD_PCIE := n
 #CONFIG_BCMDHD_USB := y
 
 CONFIG_BCMDHD_OOB := y
@@ -69,6 +69,8 @@ CONFIG_BCMDHD_TPUT := y
 
 CONFIG_MACH_PLATFORM := y
 #CONFIG_BCMDHD_DTS := y
+
+
 
 DHDCFLAGS = -Wall -Wstrict-prototypes -Wno-date-time -Wno-strict-prototypes   \
 	-Wno-uninitialized -Wno-unused-but-set-variable -Wno-address	      \
@@ -96,7 +98,9 @@ DHDOFILES = aiutils.o siutils.o sbutils.o                                 \
 	dhd_linux_exportfs.o dhd_linux_pktdump.o dhd_mschdbg.o linuxerrmap.o  \
 	dhd_linux_tx.o dhd_linux_rx.o fwpkg_utils.o                           \
 	dhd_config.o dhd_ccode.o wl_event.o wl_android_ext.o                  \
-	wl_iapsta.o wl_escan.o wl_timer.o
+	wl_iapsta.o wl_escan.o wl_timer.o \
+	lib80211_crypto.o lib80211_crypto_ccmp.o lib80211_crypto_tkip.o \
+	lib80211_crypto_wep.o
 
 ifneq ($(CONFIG_WIRELESS_EXT),)
 	DHDOFILES += wl_iw.o
@@ -451,10 +455,11 @@ endif
 ifeq ($(CONFIG_BCMDHD_REQUEST_FW),y)
 	DHDCFLAGS += -DDHD_LINUX_STD_FW_API
 	DHDCFLAGS += -DDHD_REQUEST_FW_PATH
-	DHDCFLAGS += -DDHD_FW_NAME="\"fw_bcmdhd.bin\""
-	DHDCFLAGS += -DDHD_NVRAM_NAME="\"nvram.txt\""
-	DHDCFLAGS += -DDHD_CLM_NAME="\"clm_bcmdhd.blob\""
-	DHDCFLAGS += -DDHD_CONFIG_NAME="\"config.txt\""
+# NOTE: Disabling this. We want to use request_firmware api, but still use the config paths */
+#	DHDCFLAGS += -DDHD_FW_NAME="\"fw_bcmdhd.bin\""
+#	DHDCFLAGS += -DDHD_NVRAM_NAME="\"nvram.txt\""
+#	DHDCFLAGS += -DDHD_CLM_NAME="\"clm_bcmdhd.blob\""
+#	DHDCFLAGS += -DDHD_CONFIG_NAME="\"config.txt\""
 else
 	DHDCFLAGS += -DDHD_SUPPORT_VFS_CALL
 ifeq ($(CONFIG_BCMDHD_FW_PATH),)

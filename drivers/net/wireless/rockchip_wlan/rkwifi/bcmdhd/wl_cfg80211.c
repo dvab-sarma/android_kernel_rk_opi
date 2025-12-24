@@ -650,7 +650,7 @@ wl_cfg80211_set_tx_power(struct wiphy *wiphy,
 #endif /* WL_CFG80211_P2P_DEV_IF */
 #if defined(WL_CFG80211_P2P_DEV_IF)
 static s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy,
-	struct wireless_dev *wdev, s32 *dbm);
+	struct wireless_dev *wdev, uint link_id, s32 *dbm);
 #else
 static s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy, s32 *dbm);
 #endif /* WL_CFG80211_P2P_DEV_IF */
@@ -7829,7 +7829,7 @@ wl_cfg80211_set_tx_power(struct wiphy *wiphy,
 static s32
 #if defined(WL_CFG80211_P2P_DEV_IF)
 wl_cfg80211_get_tx_power(struct wiphy *wiphy,
-	struct wireless_dev *wdev, s32 *dbm)
+	struct wireless_dev *wdev, uint link_id, s32 *dbm)
 #else
 wl_cfg80211_get_tx_power(struct wiphy *wiphy, s32 *dbm)
 #endif /* WL_CFG80211_P2P_DEV_IF */
@@ -7838,6 +7838,7 @@ wl_cfg80211_get_tx_power(struct wiphy *wiphy, s32 *dbm)
 	struct net_device *ndev = bcmcfg_to_prmry_ndev(cfg);
 	s32 err = 0;
 
+	(void)link_id;
 	RETURN_EIO_IF_NOT_UP(cfg);
 	err = wl_get_tx_power(ndev, dbm);
 	if (unlikely(err))
@@ -21410,6 +21411,13 @@ s32 wl_cfg80211_up(struct net_device *net)
 #ifdef WL_DUAL_STA
 	cfg->inet_ndev = net;
 #endif /* WL_DUAL_STA */
+	
+	/* Validate primary network device is ready before attempting ioctl */
+	if (!cfg || !cfg->wdev || !bcmcfg_to_prmry_ndev(cfg)) {
+		WL_DBG(("Primary network device not ready yet\n"));
+		return -ENODEV;
+	}
+	
 	if ((err = wldev_ioctl_get(bcmcfg_to_prmry_ndev(cfg), WLC_GET_VERSION, &val,
 		sizeof(int)) < 0)) {
 		WL_ERR(("WLC_GET_VERSION failed, err=%d\n", err));
@@ -25598,7 +25606,7 @@ wl_cfg80211_sup_event_handler(struct bcm_cfg80211 *cfg, bcm_struct_cfgdev *cfgde
 		}
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)) || \
 		((ANDROID_VERSION >= 13) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 94)))
-		cfg80211_port_authorized(ndev, (const u8 *)curbssid, GFP_KERNEL);
+		cfg80211_port_authorized(ndev, (const u8 *)curbssid, NULL, 0, GFP_KERNEL);
 #else
 		cfg80211_port_authorized(ndev, (const u8 *)curbssid, GFP_KERNEL);
 #endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0) */

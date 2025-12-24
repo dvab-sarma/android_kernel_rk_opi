@@ -107,7 +107,7 @@
 #include <dhd_plat.h>
 
 #if defined(CUSTOMER_HW_ROCKCHIP) && defined(CONFIG_ARCH_ROCKCHIP)
-#include <linux/aspm_ext.h>
+//#include <linux/aspm_ext.h>
 #endif
 
 #define PCI_CFG_RETRY		10		/* PR15065: retry count for pci cfg accesses */

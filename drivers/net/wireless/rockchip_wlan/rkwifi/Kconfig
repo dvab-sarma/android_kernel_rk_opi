@@ -2,8 +2,8 @@
 config AP6XXX
 	tristate "ap6xxx wireless cards support"
 	depends on RFKILL_RK
-	select CFG80211
-	select MAC80211
+	depends on CFG80211 && MAC80211
+	default m if RFKILL_RK
 	help
 	  This module adds support for wireless adapters based on
 	  Broadcom ap6xxx chipset.
@@ -36,6 +36,12 @@ config PCIEASPM_ROCKCHIP_WIFI_EXTENSION
 	help
 	  This enables the extensions APIs for ASPM control.
 
+config BCMDHD_REQUEST_FW 
+	bool "Request Firmware"
+	depends on BCMDHD
+	help
+	  Requests firmware using request_firmware api
+
 config BCMDHD_FW_PATH
 	depends on BCMDHD
 	string "Firmware path"
@@ -48,7 +54,21 @@ config BCMDHD_NVRAM_PATH
 	string "NVRAM path"
 	default "/vendor/etc/firmware/nvram.txt"
 	help
-	  Path to the calibration file.a
+	  Path to the calibration file.
+
+config BCMDHD_CLM_PATH
+	depends on BCMDHD
+	string "CLM path"
+	default "/vendor/etc/firmware/clm_bcmdhd.blob"
+	help
+	  Path to the CLM file.
+
+config BCMDHD_CONFIG_PATH
+	depends on BCMDHD
+	string "Config path"
+	default "/vendor/etc/firmware/config.txt"
+	help
+	  Path to the config file.
 
 config BCMDHD_STATIC_IF
 	bool "Enable wlan1 support"
