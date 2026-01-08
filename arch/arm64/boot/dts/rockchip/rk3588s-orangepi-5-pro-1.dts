@@ -967,7 +967,7 @@
 
 &pd_gpu {
 	domain-supply = <&vdd_gpu_s0>;
-};ssssssssssssssssss
+};
 
 &pinctrl {
     leds_gpio {
