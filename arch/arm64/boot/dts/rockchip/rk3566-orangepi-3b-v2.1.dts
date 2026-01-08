@@ -56,6 +56,7 @@
 	bluetooth {
 		compatible = "brcm,bcm4345c5";
 		clocks = <&rk809 1>;
+		max-speed = <3000000>;
 		clock-names = "lpo";
 		interrupt-parent = <&gpio2>;
 		interrupts = <RK_PC0 IRQ_TYPE_LEVEL_HIGH>;
