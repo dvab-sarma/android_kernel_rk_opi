@@ -965,10 +965,6 @@
 	status = "disabled";
 };
 
-&pd_gpu {
-	domain-supply = <&vdd_gpu_s0>;
-};
-
 &pinctrl {
     leds_gpio {
 		leds_rgb: leds-rgb {
