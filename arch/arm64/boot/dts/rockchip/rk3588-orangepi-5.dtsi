@@ -413,6 +413,26 @@
 	status = "okay";
 };
 
+&vdec0 {
+	status = "okay";
+};
+
+&vdec0_mmu {
+	status = "okay";
+};
+
+&vdec1 {
+	status = "okay";
+};
+
+&vdec1_mmu {
+	status = "okay";
+};
+
+&av1d {
+	status = "okay";
+};
+
 &sdhci {
 	bus-width = <8>;
 	no-sdio;

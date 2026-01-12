@@ -380,6 +380,26 @@
 	domain-supply = <&vdd_npu_s0>;
 };
 
+&vdec0 {
+	status = "okay";
+};
+
+&vdec0_mmu {
+	status = "okay";
+};
+
+&vdec1 {
+	status = "okay";
+};
+
+&vdec1_mmu {
+	status = "okay";
+};
+
+&av1d {
+	status = "okay";
+};
+
 &pinctrl {
 	hym8563 {
 		hym8563_int: hym8563-int {
