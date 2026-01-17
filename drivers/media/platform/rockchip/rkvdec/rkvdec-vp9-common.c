@@ -2,7 +2,13 @@
 /*
  * Rockchip video decoder VP9 common functions
  *
- * Copyright (C) 2025 Venkata Atchuta Bheemeswara Sarma Darbha <vdarbha0473@gmail.com>
+ * Copyright (C) 2019 Collabora, Ltd.
+ *	Boris Brezillon <boris.brezillon@collabora.com>
+ * Copyright (C) 2021 Collabora, Ltd.
+ *	Andrzej Pietrasiewicz <andrzej.p@collabora.com>
+ *
+ * Copyright (C) 2016 Rockchip Electronics Co., Ltd.
+ *	Alpha Lin <Alpha.Lin@rock-chips.com>
  */
 #include <linux/v4l2-common.h>
 #include <media/v4l2-h264.h>
