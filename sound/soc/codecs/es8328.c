@@ -14,6 +14,7 @@
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <linux/regulator/consumer.h>
+#include <linux/property.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
@@ -405,6 +406,8 @@ static const struct snd_soc_dapm_route es8328_dapm_routes[] = {
 	{ "Right ADC", NULL, "ADC DIG" },
 
 	{ "Mic Bias", NULL, "Mic Bias Gen" },
+	{ "Left ADC", NULL, "Mic Bias" },
+	{ "Right ADC", NULL, "Mic Bias" },
 
 	{ "Left Line Mux", "Line 1", "LINPUT1" },
 	{ "Left Line Mux", "Line 2", "LINPUT2" },
@@ -796,6 +799,18 @@ static int es8328_component_probe(struct snd_soc_component *component)
 		dev_err(component->dev, "unable to prepare codec clk\n");
 		goto clk_fail;
 	}
+
+	/* OPi5+: ES8328 powers up muted/min; set audible defaults for 3.5mm */
+	snd_soc_component_write(component, ES8328_LDACVOL, 0x00);
+	snd_soc_component_write(component, ES8328_RDACVOL, 0x00);
+	snd_soc_component_write(component, ES8328_LOUT1VOL, 0x1e);
+	snd_soc_component_write(component, ES8328_ROUT1VOL, 0x1e);
+	snd_soc_component_write(component, ES8328_LOUT2VOL, 0x1e);
+	snd_soc_component_write(component, ES8328_ROUT2VOL, 0x1e);
+
+	/* OPi5+ onboard mic: ES8388 shares one LRCK pin; set SLRCK (DACCONTROL21 bit7) */
+	if (device_property_read_bool(component->dev, "everest,mic-lrck-same"))
+		snd_soc_component_update_bits(component, ES8328_DACCONTROL21, 0x80, 0x80);
 
 	return 0;
 
