@@ -413,3 +413,8 @@
 		remote-endpoint = <&hdmi1_in_vp1>;
 	};
 };
+
+/* OPi5+ onboard mic: enable shared ADC/DAC LRCK on the ES8388 codec */
+&es8388 {
+	everest,mic-lrck-same;
+};
