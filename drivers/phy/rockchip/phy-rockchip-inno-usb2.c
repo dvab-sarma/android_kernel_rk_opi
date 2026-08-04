@@ -1323,7 +1323,8 @@ static int rockchip_usb2phy_otg_port_init(struct rockchip_usb2phy *rphy,
 			goto out;
 		}
 
-		if (!of_property_present(rphy->dev->of_node, "extcon")) {
+		if (!of_property_present(rphy->dev->of_node, "extcon")&&
+		    rport->port_cfg->utmi_id.offset) {
 			/* do initial sync of usb state */
 			id = property_enabled(rphy->grf, &rport->port_cfg->utmi_id);
 			extcon_set_state_sync(rphy->edev, EXTCON_USB_HOST, !id);
