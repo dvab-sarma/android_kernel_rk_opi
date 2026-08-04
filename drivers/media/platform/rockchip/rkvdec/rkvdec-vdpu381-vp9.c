@@ -32,7 +32,7 @@
 
 #define RKVDEC_VP9_PROBE_SIZE      4864
 #define RKVDEC_VP9_COUNT_SIZE      13208
-#define RKVDEC_VP9_MAX_SEGMAP_SIZE 73728
+#define RKVDEC_VP9_MAX_SEGMAP_SIZE 130560
 
 /* Data structure describing auxiliary buffer format. */
 struct rkvdec_vp9_priv_tbl {
@@ -574,7 +574,7 @@ static void config_registers(struct rkvdec_ctx *ctx,
                 break;
             case 2:
                 regs->vp9_param.reg92.vp9_aref_hor_scale = hscale;
-                regs->vp9_param.reg93.vp9_aref_ver_scale = hscale;
+                regs->vp9_param.reg93.vp9_aref_ver_scale = vscale;
                 break;
         }
 
