@@ -215,10 +215,25 @@ static void rockchip_pcie_enable_l0s(struct dw_pcie *pci)
 	}
 }
 
+static int rockchip_pcie_wait_for_speed_change(struct dw_pcie *pci)
+{
+	u32 val;
+	unsigned int retries;
+	for (retries = 0; retries < 200; retries++) {
+		val = dw_pcie_readl_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL);
+		if (!(val & PORT_LOGIC_SPEED_CHANGE))
+			return 0;
+		usleep_range(100, 1000);
+	}
+	dev_warn(pci->dev, "PCIe directed speed change timed out\n");
+	return -ETIMEDOUT;
+}
+
 static int rockchip_pcie_start_link(struct dw_pcie *pci)
 {
 	struct rockchip_pcie *rockchip = to_rockchip_pcie(pci);
-
+	u32 val;
+	int ret;
 	/* Reset device */
 	gpiod_set_value_cansleep(rockchip->rst_gpio, 0);
 
@@ -236,6 +251,28 @@ static int rockchip_pcie_start_link(struct dw_pcie *pci)
 	msleep(PCIE_T_PVPERL_MS);
 	gpiod_set_value_cansleep(rockchip->rst_gpio, 1);
 
+	/*
+	 * dw_pcie_setup_rc() sets PORT_LOGIC_SPEED_CHANGE before LTSSM starts,
+	 * but on some DesignWare IP revisions the LTSSM consumes that bit
+	 * during initial training before the link reaches L0 — so the directed
+	 * speed change never fires. Work around this by waiting for the Gen1
+	 * link, then re-triggering the speed change explicitly.
+	 */
+	 if (pci->max_link_speed > 1) {
+		ret = dw_pcie_wait_for_link(pci);
+		if (ret)
+			return ret;
+		val = dw_pcie_readl_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL);
+		val |= PORT_LOGIC_SPEED_CHANGE;
+		dw_pcie_writel_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL, val);
+		ret = rockchip_pcie_wait_for_speed_change(pci);
+		if(ret) {
+			dev_err(pci->dev, "Failed to bring link up!\n");
+		}
+
+	} else {
+		dev_info(pci->dev, "Link: Only Gen1 is enabled\n");
+	}
 	return 0;
 }
 
@@ -263,8 +300,19 @@ static int rockchip_pcie_host_init(struct dw_pcie_rp *pp)
 
 	irq_set_chained_handler_and_data(irq, rockchip_pcie_intx_handler,
 					 rockchip);
-
+	
+	/*disable L0s for now as its buggy with the gen2 link change*/
 	rockchip_pcie_enable_l0s(pci);
+
+	// if (pci->max_link_speed > 1) {
+	// 	u8 cap = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
+	// 	u32 lnkcap = dw_pcie_readl_dbi(pci, cap + PCI_EXP_LNKCAP);
+	// 	lnkcap &= ~PCI_EXP_LNKCAP_SLS;
+	// 	lnkcap |= pci->max_link_speed;
+	// 	dw_pcie_dbi_ro_wr_en(pci);
+	// 	dw_pcie_writel_dbi(pci, cap + PCI_EXP_LNKCAP, lnkcap);
+	// 	dw_pcie_dbi_ro_wr_dis(pci);
+	// }
 
 	return 0;
 }
