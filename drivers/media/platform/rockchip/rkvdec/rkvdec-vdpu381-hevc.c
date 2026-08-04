@@ -571,7 +571,7 @@ static void rkvdec_hevc_stop(struct rkvdec_ctx *ctx)
 static int rkvdec_hevc_run(struct rkvdec_ctx *ctx)
 {
 	struct rkvdec_dev *rkvdec = ctx->dev;
-	struct rkvdec_hevc_run run;
+	struct rkvdec_hevc_run run = {};
 	struct rkvdec_hevc_ctx *hevc_ctx = ctx->priv;
 	struct rkvdec_hevc_priv_tbl *tbl = hevc_ctx->priv_tbl.cpu;
 
