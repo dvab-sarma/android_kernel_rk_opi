@@ -639,4 +639,4 @@
  * Optional CM5 AP6256 UART Bluetooth wiring.
  * Uses the RTC clock declared by the base board.
  */
-// CM5_BT_INCLUDE
+#include "rk3588s-orangepi-cm5-tablet-bluetooth.dtsi"
