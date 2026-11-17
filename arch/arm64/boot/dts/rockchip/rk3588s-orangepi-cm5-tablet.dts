@@ -627,7 +627,7 @@
  * Optional CM5 HDMI routing.
  * Kept separate from radio and base-board wiring.
  */
-// CM5_HDMI_INCLUDE
+#include "rk3588s-orangepi-cm5-tablet-hdmi.dtsi"
 
 /*
  * Optional CM5 AP6256 SDIO Wi-Fi wiring.
