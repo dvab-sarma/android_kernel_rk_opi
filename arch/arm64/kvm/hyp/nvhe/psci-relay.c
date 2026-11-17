@@ -14,6 +14,7 @@
 #include <nvhe/arm-smccc.h>
 #include <nvhe/mem_protect.h>
 #include <nvhe/memory.h>
+#include <nvhe/mm.h>
 #include <nvhe/modules.h>
 #include <nvhe/pkvm.h>
 #include <nvhe/trap_handler.h>
@@ -228,6 +229,36 @@ static int psci_system_suspend(u64 func_id, struct kvm_cpu_context *host_ctxt)
 			 __hyp_pa(init_params), 0);
 }
 
+static void psci_relax_late_cpu_vector(void)
+{
+	u64 pfr0;
+	u8 csv2;
+
+	pfr0 = read_sysreg_s(SYS_ID_AA64PFR0_EL1);
+	csv2 = cpuid_feature_extract_unsigned_field(pfr0, ID_AA64PFR0_EL1_CSV2_SHIFT);
+	if (csv2 >= ID_AA64PFR0_EL1_CSV2_CSV2_3) {
+		pkvm_cpu_set_vector(HYP_VECTOR_DIRECT);
+	} else if (csv2) {
+		u64 mmfr1 = read_sysreg_s(SYS_ID_AA64MMFR1_EL1);
+
+		if (cpuid_feature_extract_unsigned_field(mmfr1, ID_AA64MMFR1_EL1_ECBHB_SHIFT))
+			pkvm_cpu_set_vector(HYP_VECTOR_DIRECT);
+	}
+}
+
+static void psci_handle_late_cpu(struct kvm_cpu_context *host_ctxt)
+{
+	if (!host_data_test_flag(PKVM_LATE_CPU))
+		return;
+
+	kvm_init_host_cpu_context(host_ctxt);
+	kvm_init_host_debug_data();
+
+	psci_relax_late_cpu_vector();
+
+	host_data_clear_flag(PKVM_LATE_CPU);
+}
+
 asmlinkage void __noreturn __kvm_host_psci_cpu_entry(bool is_cpu_on)
 {
 	struct psci_boot_args *boot_args;
@@ -236,6 +267,11 @@ asmlinkage void __noreturn __kvm_host_psci_cpu_entry(bool is_cpu_on)
 	__hyp_enter();
 
 	host_ctxt = host_data_ptr(host_ctxt);
+
+	psci_handle_late_cpu(host_ctxt);
+
+	if (static_branch_unlikely(&kvm_vgic_global_state.gicv3_cpuif))
+		__vgic_v3_init_lrs();
 
 	if (is_cpu_on)
 		boot_args = this_cpu_ptr(&cpu_on_args);
@@ -297,6 +333,14 @@ void psci_mem_protect_dec(u64 n)
 	hyp_spin_unlock(&mem_protect_lock);
 }
 
+static unsigned long psci_poison_and_freeze(struct kvm_cpu_context *host_ctxt)
+{
+	pkvm_poison_pvmfw_pages();
+	/* Avoid racing with a MEM_PROTECT call. */
+	hyp_spin_lock(&mem_protect_lock);
+	return psci_forward(host_ctxt);
+}
+
 static unsigned long psci_0_1_handler(u64 func_id, struct kvm_cpu_context *host_ctxt)
 {
 	if (is_psci_0_1(cpu_off, func_id) || is_psci_0_1(migrate, func_id))
@@ -325,10 +369,7 @@ static unsigned long psci_0_2_handler(u64 func_id, struct kvm_cpu_context *host_
 	 */
 	case PSCI_0_2_FN_SYSTEM_OFF:
 	case PSCI_0_2_FN_SYSTEM_RESET:
-		pkvm_poison_pvmfw_pages();
-		/* Avoid racing with a MEM_PROTECT call. */
-		hyp_spin_lock(&mem_protect_lock);
-		return psci_forward(host_ctxt);
+		return psci_poison_and_freeze(host_ctxt);
 	case PSCI_0_2_FN64_CPU_SUSPEND:
 		return psci_cpu_suspend(func_id, host_ctxt);
 	case PSCI_0_2_FN64_CPU_ON:
@@ -360,9 +401,10 @@ static unsigned long psci_1_0_handler(u64 func_id, struct kvm_cpu_context *host_
 		return psci_system_reset2(host_ctxt);
 	case PSCI_1_0_FN_PSCI_FEATURES:
 	case PSCI_1_0_FN_SET_SUSPEND_MODE:
+		return psci_forward(host_ctxt);
 	case PSCI_1_3_FN_SYSTEM_OFF2:
 	case PSCI_1_3_FN64_SYSTEM_OFF2:
-		return psci_forward(host_ctxt);
+		return psci_poison_and_freeze(host_ctxt);
 	case PSCI_1_0_FN64_SYSTEM_SUSPEND:
 		return psci_system_suspend(func_id, host_ctxt);
 	default:

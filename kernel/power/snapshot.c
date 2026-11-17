@@ -2177,6 +2177,7 @@ unsigned long snapshot_get_image_size(void)
 {
 	return nr_copy_pages + nr_meta_pages + 1;
 }
+EXPORT_SYMBOL_GPL(snapshot_get_image_size);
 
 static int init_header(struct swsusp_info *info)
 {
@@ -2856,6 +2857,17 @@ int snapshot_write_finalize(struct snapshot_handle *handle)
 {
 	int error;
 
+	/*
+	 * Call snapshot_write_next() to drain any trailing zero pages,
+	 * but make sure we're in the data page region first.
+	 * This function can return PAGE_SIZE if the kernel was expecting
+	 * another copy page. Return -ENODATA in that situation.
+	 */
+	if (handle->cur > nr_meta_pages + 1) {
+		error = snapshot_write_next(handle);
+		if (error)
+			return error > 0 ? -ENODATA : error;
+	}
 	copy_last_highmem_page();
 	error = hibernate_restore_protect_page(handle->buffer);
 	/* Do that only if we have loaded the image entirely */

@@ -146,7 +146,7 @@ static void kvm_arm_smmu_detach_dev_pasid(struct device *dev,
 			int ret;
 			u32 sid = master->streams[i].id;
 
-			ret = kvm_iommu_set_identity(hyp_drv_id, host_smmu->id, sid, false);
+			ret = kvm_iommu_set_identity(hyp_drv_id, host_smmu->id, sid, false, 0);
 			if (ret)
 				dev_err(dev, "Failed to disable identity(sid=0x%x) %d\n",
 					sid, ret);
@@ -166,6 +166,7 @@ static void kvm_arm_smmu_release_device(struct device *dev)
 	if (domain)
 		kvm_arm_smmu_detach_dev_pasid(dev, domain, 0);
 	arm_smmu_remove_master(master);
+	kfree(master);
 }
 
 static int kvm_arm_smmu_attach_dev_pasid(struct iommu_domain *domain,
@@ -215,6 +216,7 @@ static int kvm_arm_smmu_attach_dev(struct iommu_domain *domain,
 /* The main kvm_arm_smmu_attach_dev() handles also the blocked domain. */
 static const struct iommu_domain_ops kvm_arm_smmu_blocked_ops = {
 	.attach_dev = kvm_arm_smmu_attach_dev,
+	.set_dev_pasid = kvm_arm_smmu_attach_dev_pasid,
 };
 
 static int kvm_arm_smmu_domain_finalize(struct kvm_arm_smmu_domain *kvm_smmu_domain,
@@ -224,8 +226,9 @@ static int kvm_arm_smmu_domain_finalize(struct kvm_arm_smmu_domain *kvm_smmu_dom
 	struct arm_smmu_device *smmu = master->smmu;
 	struct host_arm_smmu_device *host_smmu = smmu_to_host(smmu);
 	struct io_pgtable_cfg cfg;
+	size_t ias = (smmu->features & ARM_SMMU_FEAT_VAX) ? 52 : 48;
 
-	cfg.ias = smmu->ias;
+	cfg.ias = min_t(unsigned long, ias, VA_BITS);
 	cfg.oas = smmu->oas;
 	cfg.pgsize_bitmap = smmu->pgsize_bitmap;
 
@@ -257,6 +260,9 @@ static int kvm_arm_smmu_map_pages(struct iommu_domain *domain,
 {
 	struct kvm_arm_smmu_domain *kvm_smmu_domain = to_kvm_smmu_domain(domain);
 
+	if (!kvm_smmu_domain->smmu)
+		return -ENODEV;
+
 	return kvm_iommu_map_pages(kvm_smmu_domain->id, iova, paddr,
 				   pgsize, pgcount, prot, gfp, total_mapped);
 }
@@ -267,12 +273,18 @@ static size_t kvm_arm_smmu_unmap_pages(struct iommu_domain *domain,
 {
 	struct kvm_arm_smmu_domain *kvm_smmu_domain = to_kvm_smmu_domain(domain);
 
+	if (!kvm_smmu_domain->smmu)
+		return 0;
+
 	return kvm_iommu_unmap_pages(kvm_smmu_domain->id, iova, pgsize, pgcount);
 }
 static phys_addr_t kvm_arm_smmu_iova_to_phys(struct iommu_domain *domain,
 					     dma_addr_t iova)
 {
 	struct kvm_arm_smmu_domain *kvm_smmu_domain = to_kvm_smmu_domain(domain);
+
+	if (!kvm_smmu_domain->smmu)
+		return 0;
 
 	return kvm_iommu_iova_to_phys(kvm_smmu_domain->id, iova);
 }
@@ -342,7 +354,7 @@ static int kvm_arm_smmu_attach_dev_identity(struct iommu_domain *domain,
 	for (i = 0; i < master->num_streams; i++) {
 		u32 sid = master->streams[i].id;
 
-		ret = kvm_iommu_set_identity(hyp_drv_id, host_smmu->id, sid, true);
+		ret = kvm_iommu_set_identity(hyp_drv_id, host_smmu->id, sid, true, 0);
 		if (ret) {
 			dev_err(dev, "Failed to enable identity(sid=0x%x) %d\n", sid, ret);
 			return ret;
@@ -387,8 +399,10 @@ static struct iommu_map_cookie_sg *kvm_arm_smmu_alloc_cookie_sg(unsigned long io
 	/* Rounds nents to allocate to page aligned size. */
 	map_sg->nents = kvm_iommu_sg_nents_round(nents);
 	map_sg->sg = kvm_iommu_sg_alloc(map_sg->nents, gfp);
-	if (!map_sg->sg)
+	if (!map_sg->sg) {
+		kfree(map_sg);
 		return NULL;
+	}
 	map_sg->iova = iova;
 	map_sg->prot = prot;
 	map_sg->gfp = gfp;
@@ -529,7 +543,26 @@ static bool kvm_arm_smmu_validate_features(struct arm_smmu_device *smmu)
 
 static irqreturn_t kvm_arm_smmu_evt_handler(int irq, void *dev)
 {
-	return arm_smmu_evtq_common(irq, dev, arm_smmu_handle_event);
+	int ret;
+	irqreturn_t irq_ret;
+	struct arm_smmu_device *smmu = dev;
+	struct host_arm_smmu_device *host_smmu = smmu_to_host(smmu);
+	bool has_pd = host_smmu->power_domain.type != KVM_POWER_DOMAIN_NONE;
+
+	if (has_pd) {
+		ret = pm_runtime_resume_and_get(smmu->dev);
+		if (ret < 0) {
+			dev_err(smmu->dev, "Failed to resume device: %d\n", ret);
+			return IRQ_NONE;
+		}
+	}
+
+	irq_ret = arm_smmu_evtq_common(irq, dev, arm_smmu_handle_event);
+
+	if (has_pd)
+		pm_runtime_put(smmu->dev);
+
+	return irq_ret;
 }
 
 static void kvm_arm_smmu_cmdq_err(struct arm_smmu_device *smmu)
@@ -540,7 +573,26 @@ static void kvm_arm_smmu_cmdq_err(struct arm_smmu_device *smmu)
 
 static irqreturn_t kvm_arm_smmu_gerror_handler(int irq, void *dev)
 {
-	return arm_smmu_gerror_common(irq, dev, kvm_arm_smmu_cmdq_err);
+	int ret;
+	irqreturn_t irq_ret;
+	struct arm_smmu_device *smmu = dev;
+	struct host_arm_smmu_device *host_smmu = smmu_to_host(smmu);
+	bool has_pd = host_smmu->power_domain.type != KVM_POWER_DOMAIN_NONE;
+
+	if (has_pd) {
+		ret = pm_runtime_get_if_active(smmu->dev);
+		if (ret <= 0) {
+			dev_err(smmu->dev, "Unable to handle global error interrupt because device not runtime active\n");
+			return IRQ_NONE;
+		}
+	}
+
+	irq_ret = arm_smmu_gerror_common(irq, dev, kvm_arm_smmu_cmdq_err);
+
+	if (has_pd)
+		pm_runtime_put(smmu->dev);
+
+	return irq_ret;
 }
 
 static irqreturn_t kvm_arm_smmu_combined_handler(int irq, void *dev)
@@ -685,6 +737,8 @@ static int kvm_arm_smmu_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	mutex_init(&smmu->streams_mutex);
+
 	ret = kvm_arm_smmu_device_reset(host_smmu);
 	if (ret)
 		return ret;
@@ -706,7 +760,6 @@ static int kvm_arm_smmu_probe(struct platform_device *pdev)
 	hyp_smmu->common.strtab_cfg = smmu->strtab_cfg;
 	hyp_smmu->common.pgsize_bitmap = smmu->pgsize_bitmap;
 	hyp_smmu->common.oas = smmu->oas;
-	hyp_smmu->common.ias = smmu->ias;
 	hyp_smmu->common.mmio_addr = host_smmu->ioaddr;
 	hyp_smmu->common.mmio_size = size;
 	hyp_smmu->common.features = smmu->features;

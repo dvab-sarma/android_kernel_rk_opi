@@ -27,6 +27,10 @@
 #include <linux/zswap.h>
 #include "swap.h"
 
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/mm.h>
+#include <trace/hooks/vmscan.h>
+
 static void __end_swap_bio_write(struct bio *bio)
 {
 	struct folio *folio = bio_first_folio_all(bio);
@@ -284,6 +288,7 @@ int swap_writeout(struct folio *folio, struct swap_iocb **swap_plug)
 	__swap_writepage(folio, swap_plug);
 	return 0;
 out_unlock:
+	trace_android_vh_shrink_folio_lock_owner_clear(folio);
 	folio_unlock(folio);
 	return ret;
 }
@@ -380,6 +385,7 @@ static void swap_writepage_fs(struct folio *folio, struct swap_iocb **swap_plug)
 
 	count_swpout_vm_event(folio);
 	folio_start_writeback(folio);
+	trace_android_vh_shrink_folio_lock_owner_clear(folio);
 	folio_unlock(folio);
 	if (sio) {
 		if (sio->iocb.ki_filp != swap_file ||
@@ -421,6 +427,7 @@ static void swap_writepage_bdev_sync(struct folio *folio,
 	count_swpout_vm_event(folio);
 
 	folio_start_writeback(folio);
+	trace_android_vh_shrink_folio_lock_owner_clear(folio);
 	folio_unlock(folio);
 
 	submit_bio_wait(&bio);
@@ -440,6 +447,7 @@ static void swap_writepage_bdev_async(struct folio *folio,
 	bio_associate_blkg_from_page(bio, folio);
 	count_swpout_vm_event(folio);
 	folio_start_writeback(folio);
+	trace_android_vh_shrink_folio_lock_owner_clear(folio);
 	folio_unlock(folio);
 	submit_bio(bio);
 }
@@ -447,24 +455,31 @@ static void swap_writepage_bdev_async(struct folio *folio,
 void __swap_writepage(struct folio *folio, struct swap_iocb **swap_plug)
 {
 	struct swap_info_struct *sis = __swap_entry_to_info(folio->swap);
+	unsigned long sis_flags = 0;
+	unsigned long swap_writepage_start;
 
 	VM_BUG_ON_FOLIO(!folio_test_swapcache(folio), folio);
+	trace_android_vh_swap_writepage_start(&swap_writepage_start);
 	/*
 	 * ->flags can be updated non-atomicially (scan_swap_map_slots),
 	 * but that will never affect SWP_FS_OPS, so the data_race
 	 * is safe.
 	 */
-	if (data_race(sis->flags & SWP_FS_OPS))
+	sis_flags = data_race(sis->flags);
+	trace_android_vh_swap_writepage(&sis_flags, &folio->page);
+	if (sis_flags & SWP_FS_OPS)
 		swap_writepage_fs(folio, swap_plug);
 	/*
 	 * ->flags can be updated non-atomicially (scan_swap_map_slots),
-	 * but that will never affect SWP_SYNCHRONOUS_IO, so the data_race
+	 * but that will never affect __SWP_WRITE_SYNCHRONOUS_IO, so the data_race
 	 * is safe.
 	 */
-	else if (data_race(sis->flags & SWP_SYNCHRONOUS_IO))
+	else if (sis_flags & __SWP_WRITE_SYNCHRONOUS_IO)
 		swap_writepage_bdev_sync(folio, sis);
 	else
 		swap_writepage_bdev_async(folio, sis);
+
+	trace_android_vh_swap_writepage_end(&folio->page, swap_writepage_start);
 }
 
 void swap_write_unplug(struct swap_iocb *sio)
@@ -574,6 +589,17 @@ static void swap_read_folio_bdev_sync(struct folio *folio,
 {
 	struct bio_vec bv;
 	struct bio bio;
+	bool read = false;
+
+	trace_android_rvh_swap_read_folio_bdev_sync(sis->bdev,
+		swap_folio_sector(folio) + get_start_sect(sis->bdev),
+		&folio->page, &read);
+	if (read) {
+		count_mthp_stat(folio_order(folio), MTHP_STAT_SWPIN);
+		count_memcg_folio_events(folio, PSWPIN, folio_nr_pages(folio));
+		count_vm_events(PSWPIN, folio_nr_pages(folio));
+		return;
+	}
 
 	bio_init(&bio, sis->bdev, &bv, 1, REQ_OP_READ);
 	bio.bi_iter.bi_sector = swap_folio_sector(folio);
@@ -587,6 +613,7 @@ static void swap_read_folio_bdev_sync(struct folio *folio,
 	count_memcg_folio_events(folio, PSWPIN, folio_nr_pages(folio));
 	count_vm_events(PSWPIN, folio_nr_pages(folio));
 	submit_bio_wait(&bio);
+	trace_android_rvh_swap_bio_charge(&bio);
 	__end_swap_bio_read(&bio);
 	put_task_struct(current);
 }
@@ -613,10 +640,12 @@ void swap_read_folio(struct folio *folio, struct swap_iocb **plug)
 	bool workingset = folio_test_workingset(folio);
 	unsigned long pflags;
 	bool in_thrashing;
+	unsigned long swapin_start;
 
 	VM_BUG_ON_FOLIO(!folio_test_swapcache(folio) && !synchronous, folio);
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(folio_test_uptodate(folio), folio);
+	trace_android_vh_swapin_start(&swapin_start);
 
 	/*
 	 * Count submission time as memory stall and delay. When the device
@@ -654,6 +683,7 @@ finish:
 		psi_memstall_leave(&pflags);
 	}
 	delayacct_swapin_end();
+	trace_android_vh_swapin_end(folio, swapin_start);
 }
 
 void __swap_read_unplug(struct swap_iocb *sio)

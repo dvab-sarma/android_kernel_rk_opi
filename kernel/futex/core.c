@@ -150,8 +150,10 @@ static bool futex_private_hash_get(struct futex_private_hash *fph)
 
 void futex_private_hash_put(struct futex_private_hash *fph)
 {
+	struct mm_struct *mm = fph->mm;
+
 	if (futex_ref_put(fph))
-		wake_up_var(fph->mm);
+		wake_up_var(mm);
 }
 
 /**
@@ -343,7 +345,7 @@ static int __futex_key_to_node(struct mm_struct *mm, unsigned long addr)
 	if (!vma)
 		return FUTEX_NO_NODE;
 
-	mpol = vma_policy(vma);
+	mpol = READ_ONCE(vma->vm_policy);
 	if (!mpol)
 		return FUTEX_NO_NODE;
 

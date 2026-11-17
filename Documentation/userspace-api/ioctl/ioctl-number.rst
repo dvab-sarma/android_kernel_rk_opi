@@ -145,6 +145,7 @@ Code  Seq#    Include File                                             Comments
 'F'   DD     video/sstfb.h                                             conflict!
 'G'   00-3F  drivers/misc/sgi-gru/grulib.h                             conflict!
 'G'   00-0F  xen/gntalloc.h, xen/gntdev.h                              conflict!
+'G'   00-0F  linux/gunyah.h                                            conflict!
 'H'   00-7F  linux/hiddev.h                                            conflict!
 'H'   00-0F  linux/hidraw.h                                            conflict!
 'H'   01     linux/mei.h                                               conflict!
@@ -229,7 +230,6 @@ Code  Seq#    Include File                                             Comments
                                                                        <mailto:gregkh@linuxfoundation.org>
 'a'   all    linux/atm*.h, linux/sonet.h                               ATM on linux
                                                                        <http://lrcwww.epfl.ch/>
-'a'   00-0F  drivers/crypto/qat/qat_common/adf_cfg_common.h            conflict! qat driver
 'b'   00-FF                                                            conflict! bit3 vme host bridge
                                                                        <mailto:natalia@nikhefk.nikhef.nl>
 'b'   00-0F  linux/dma-buf.h                                           conflict!

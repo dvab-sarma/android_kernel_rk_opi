@@ -61,6 +61,11 @@ DECLARE_HOOK(android_vh_ufs_check_int_errors,
 	TP_PROTO(struct ufs_hba *hba, bool queue_eh_work),
 	TP_ARGS(hba, queue_eh_work));
 
+struct scsi_device;
+DECLARE_HOOK(android_vh_ufs_update_sdev,
+	TP_PROTO(struct scsi_device *sdev),
+	TP_ARGS(sdev));
+
 DECLARE_HOOK(android_vh_ufs_eh_timed_out,
 	TP_PROTO(struct ufs_hba *hba, struct scsi_cmnd *scmd),
 	TP_ARGS(hba, scmd));
@@ -80,6 +85,14 @@ DECLARE_HOOK(android_vh_ufs_wait_for_uic_cmd,
 DECLARE_HOOK(android_vh_ufs_transfer_rsp_status,
 	TP_PROTO(struct ufs_hba *hba, struct ufshcd_lrb *lrbp, struct cq_entry *cqe, int result),
 	TP_ARGS(hba, lrbp, cqe, result));
+
+DECLARE_HOOK(android_vh_ufs_use_threaded_intr,
+	TP_PROTO(struct ufs_hba *hba, bool *use_threaded),
+	TP_ARGS(hba, use_threaded));
+
+DECLARE_HOOK(android_vh_ufs_mcq_cleanup,
+	TP_PROTO(struct ufs_hba *hba, int task_tag, bool start),
+	TP_ARGS(hba, task_tag, start));
 
 #endif /* _TRACE_HOOK_UFSHCD_H */
 /* This part must be outside protection */

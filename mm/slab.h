@@ -13,6 +13,25 @@
 #include <linux/kasan.h>
 #include <linux/stackdepot.h>
 
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/mm.h>
+
+/**
+ * enum slab_flags - How the slab flags bits are used.
+ * @SL_locked: Is locked with slab_lock()
+ * @SL_partial: On the per-node partial list
+ * @SL_pfmemalloc: Was allocated from PF_MEMALLOC reserves
+ *
+ * The slab flags share space with the page flags but some bits have
+ * different interpretations.  The high bits are used for information
+ * like zone/node/section.
+ */
+enum slab_flags {
+	SL_locked = PG_locked,
+	SL_partial = PG_workingset,     /* Historical reasons for this bit */
+	SL_pfmemalloc = PG_active,      /* Historical reasons for this bit */
+};
+
 /*
  * Internal slab definitions
  */
@@ -237,10 +256,8 @@ struct kmem_cache_order_objects {
  * Slab cache management.
  */
 struct kmem_cache {
-#ifndef CONFIG_SLUB_TINY
 	struct kmem_cache_cpu __percpu *cpu_slab;
 	struct lock_class_key lock_key;
-#endif
 	struct slub_percpu_sheaves __percpu *cpu_sheaves;
 	/* Used for retrieving partial slabs, etc. */
 	slab_flags_t flags;
@@ -294,7 +311,7 @@ struct kmem_cache {
 	unsigned int useroffset;	/* Usercopy region offset */
 	unsigned int usersize;		/* Usercopy region size */
 #endif
-
+	ANDROID_OEM_DATA(1);
 	struct kmem_cache_node *node[MAX_NUMNODES];
 };
 
@@ -397,6 +414,7 @@ static inline struct kmem_cache *
 kmalloc_slab(size_t size, kmem_buckets *b, gfp_t flags, unsigned long caller)
 {
 	unsigned int index;
+	struct kmem_cache *s = NULL;
 
 	if (!b)
 		b = &kmalloc_caches[kmalloc_type(flags, caller)];
@@ -404,6 +422,10 @@ kmalloc_slab(size_t size, kmem_buckets *b, gfp_t flags, unsigned long caller)
 		index = kmalloc_size_index[size_index_elem(size)];
 	else
 		index = fls(size - 1);
+
+	trace_android_vh_kmalloc_slab(index, flags, &s);
+	if (s)
+		return s;
 
 	return (*b)[index];
 }
@@ -434,6 +456,11 @@ static inline bool is_kmalloc_cache(struct kmem_cache *s)
 	return (s->flags & SLAB_KMALLOC);
 }
 
+static inline void __slab_clear_pfmemalloc(struct slab *slab)
+{
+	__clear_bit(SL_pfmemalloc, &slab->flags.f);
+}
+
 static inline bool is_kmalloc_normal(struct kmem_cache *s)
 {
 	if (!is_kmalloc_cache(s))
@@ -443,6 +470,7 @@ static inline bool is_kmalloc_normal(struct kmem_cache *s)
 
 bool __kfree_rcu_sheaf(struct kmem_cache *s, void *obj);
 void flush_all_rcu_sheaves(void);
+void flush_rcu_sheaves_on_cache(struct kmem_cache *s);
 
 #define SLAB_CORE_FLAGS (SLAB_HWCACHE_ALIGN | SLAB_CACHE_DMA | \
 			 SLAB_CACHE_DMA32 | SLAB_PANIC | \

@@ -184,6 +184,16 @@ TRACE_DEFINE_ENUM(CP_PHASE_FINISH_CHECKPOINT);
 		{ CP_PHASE_FINISH_BLOCK_OPS,	"finish block_ops" },			\
 		{ CP_PHASE_FINISH_CHECKPOINT,	"finish checkpoint" })
 
+#define show_lock_name(lock)						\
+	__print_symbolic(lock,						\
+		{ LOCK_NAME_CP_RWSEM,		"cp_rwsem" },		\
+		{ LOCK_NAME_NODE_CHANGE,	"node_change" },	\
+		{ LOCK_NAME_NODE_WRITE,		"node_write" },		\
+		{ LOCK_NAME_GC_LOCK,		"gc_lock" },		\
+		{ LOCK_NAME_CP_GLOBAL,		"cp_global" },		\
+		{ LOCK_NAME_IO_RWSEM,		"io_rwsem" },		\
+		{ LOCK_NAME_NAT_TREE_LOCK,	"nat_tree_lock" })
+
 struct f2fs_sb_info;
 struct f2fs_io_info;
 struct extent_info;
@@ -1358,6 +1368,7 @@ DECLARE_EVENT_CLASS(f2fs__folio,
 		__field(int, type)
 		__field(int, dir)
 		__field(pgoff_t, index)
+		__field(pgoff_t, nrpages)
 		__field(int, dirty)
 		__field(int, uptodate)
 	),
@@ -1368,16 +1379,18 @@ DECLARE_EVENT_CLASS(f2fs__folio,
 		__entry->type	= type;
 		__entry->dir	= S_ISDIR(folio->mapping->host->i_mode);
 		__entry->index	= folio->index;
+		__entry->nrpages= folio_nr_pages(folio);
 		__entry->dirty	= folio_test_dirty(folio);
 		__entry->uptodate = folio_test_uptodate(folio);
 	),
 
-	TP_printk("dev = (%d,%d), ino = %lu, %s, %s, index = %lu, "
+	TP_printk("dev = (%d,%d), ino = %lu, %s, %s, index = %lu, nr_pages = %lu, "
 		"dirty = %d, uptodate = %d",
 		show_dev_ino(__entry),
 		show_block_type(__entry->type),
 		show_file_type(__entry->dir),
 		(unsigned long)__entry->index,
+		(unsigned long)__entry->nrpages,
 		__entry->dirty,
 		__entry->uptodate)
 );
@@ -1403,11 +1416,62 @@ DEFINE_EVENT(f2fs__folio, f2fs_readpage,
 	TP_ARGS(folio, type)
 );
 
+DEFINE_EVENT(f2fs__folio, f2fs_read_folio,
+
+	TP_PROTO(struct folio *folio, int type),
+
+	TP_ARGS(folio, type)
+);
+
 DEFINE_EVENT(f2fs__folio, f2fs_set_page_dirty,
 
 	TP_PROTO(struct folio *folio, int type),
 
 	TP_ARGS(folio, type)
+);
+
+DECLARE_EVENT_CLASS(f2fs__cached_block,
+
+	TP_PROTO(struct f2fs_cached_block *block, int type),
+
+	TP_ARGS(block, type),
+
+	TP_STRUCT__entry(
+		__field(dev_t,	dev)
+		__field(pgoff_t, index)
+		__field(int,	type)
+		__field(int,	dirty)
+		__field(int,	uptodate)
+	),
+
+	TP_fast_assign(
+		__entry->dev	= block->cache->sbi->sb->s_dev;
+		__entry->index	= block->index;
+		__entry->type	= type;
+		__entry->dirty	= f2fs_cache_test_dirty(block);
+		__entry->uptodate = f2fs_cache_test_uptodate(block);
+	),
+
+	TP_printk("dev = (%d,%d), %s, index = %lu, dirty = %d, uptodate = %d",
+		show_dev(__entry->dev),
+		show_block_type(__entry->type),
+		(unsigned long)__entry->index,
+		__entry->dirty,
+		__entry->uptodate)
+);
+
+DEFINE_EVENT(f2fs__cached_block, f2fs_write_cache,
+
+	TP_PROTO(struct f2fs_cached_block *block, int type),
+
+	TP_ARGS(block, type)
+);
+
+DEFINE_EVENT(f2fs__cached_block, f2fs_cache_set_dirty,
+
+	TP_PROTO(struct f2fs_cached_block *block, int type),
+
+	TP_ARGS(block, type)
 );
 
 TRACE_EVENT(f2fs_replace_atomic_write_block,
@@ -1552,6 +1616,33 @@ TRACE_EVENT(f2fs_writepages,
 		__entry->tagged_writepages,
 		__entry->range_cyclic,
 		__entry->for_sync)
+);
+
+TRACE_EVENT(f2fs_write_caches,
+
+	TP_PROTO(struct f2fs_sb_info *sbi, long nr_to_write, long nwritten, int type),
+
+	TP_ARGS(sbi, nr_to_write, nwritten, type),
+
+	TP_STRUCT__entry(
+		__field(dev_t,	dev)
+		__field(long,	nr_to_write)
+		__field(long,	nwritten)
+		__field(int,	type)
+	),
+
+	TP_fast_assign(
+		__entry->dev		= sbi->sb->s_dev;
+		__entry->nr_to_write	= nr_to_write;
+		__entry->nwritten	= nwritten;
+		__entry->type		= type;
+	),
+
+	TP_printk("dev = (%d,%d), %s, nr_to_write = %ld, nwritten = %ld",
+		show_dev(__entry->dev),
+		show_block_type(__entry->type),
+		__entry->nr_to_write,
+		__entry->nwritten)
 );
 
 TRACE_EVENT(f2fs_readpages,
@@ -2095,11 +2186,20 @@ DEFINE_EVENT(f2fs_zip_end, f2fs_decompress_pages_end,
 );
 
 #ifdef CONFIG_F2FS_IOSTAT
+/*
+ * Number of read folio order buckets emitted by the f2fs_iostat tracepoint.
+ * TP_printk() cannot loop, so the field count is fixed here and must be >=
+ * the largest possible NR_PAGE_ORDERS (14 on arm64 with 64K pages). The
+ * BUILD_BUG_ON() in f2fs_update_read_folio_count() enforces this.
+ */
+#define F2FS_IOSTAT_RD_FOLIO_ORDERS	16
+
 TRACE_EVENT(f2fs_iostat,
 
-	TP_PROTO(struct f2fs_sb_info *sbi, unsigned long long *iostat),
+	TP_PROTO(struct f2fs_sb_info *sbi, unsigned long long *iostat,
+			unsigned long long *read_folio_count),
 
-	TP_ARGS(sbi, iostat),
+	TP_ARGS(sbi, iostat, read_folio_count),
 
 	TP_STRUCT__entry(
 		__field(dev_t,	dev)
@@ -2131,6 +2231,7 @@ TRACE_EVENT(f2fs_iostat,
 		__field(unsigned long long,	fs_mrio)
 		__field(unsigned long long,	fs_discard)
 		__field(unsigned long long,	fs_reset_zone)
+		__array(unsigned long long,	read_folio_count, F2FS_IOSTAT_RD_FOLIO_ORDERS)
 	),
 
 	TP_fast_assign(
@@ -2163,6 +2264,10 @@ TRACE_EVENT(f2fs_iostat,
 		__entry->fs_mrio	= iostat[FS_META_READ_IO];
 		__entry->fs_discard	= iostat[FS_DISCARD_IO];
 		__entry->fs_reset_zone	= iostat[FS_ZONE_RESET_IO];
+		memset(__entry->read_folio_count, 0, sizeof(__entry->read_folio_count));
+		memcpy(__entry->read_folio_count, read_folio_count,
+				sizeof(unsigned long long) *
+				min_t(int, NR_PAGE_ORDERS, F2FS_IOSTAT_RD_FOLIO_ORDERS));
 	),
 
 	TP_printk("dev = (%d,%d), "
@@ -2175,7 +2280,10 @@ TRACE_EVENT(f2fs_iostat,
 		"app [read=%llu (direct=%llu, buffered=%llu), mapped=%llu], "
 		"compr(buffered=%llu, mapped=%llu)], "
 		"fs [data=%llu, (gc_data=%llu, cdata=%llu), "
-		"node=%llu, meta=%llu]",
+		"node=%llu, meta=%llu], "
+		"read_folio_count [0=%llu, 1=%llu, 2=%llu, 3=%llu, 4=%llu, "
+		"5=%llu, 6=%llu, 7=%llu, 8=%llu, 9=%llu, 10=%llu, 11=%llu, "
+		"12=%llu, 13=%llu, 14=%llu, 15=%llu]",
 		show_dev(__entry->dev), __entry->app_wio, __entry->app_dio,
 		__entry->app_bio, __entry->app_mio, __entry->app_bcdio,
 		__entry->app_mcdio, __entry->fs_dio, __entry->fs_cdio,
@@ -2186,7 +2294,15 @@ TRACE_EVENT(f2fs_iostat,
 		__entry->app_rio, __entry->app_drio, __entry->app_brio,
 		__entry->app_mrio, __entry->app_bcrio, __entry->app_mcrio,
 		__entry->fs_drio, __entry->fs_gdrio,
-		__entry->fs_cdrio, __entry->fs_nrio, __entry->fs_mrio)
+		__entry->fs_cdrio, __entry->fs_nrio, __entry->fs_mrio,
+		__entry->read_folio_count[0], __entry->read_folio_count[1],
+		__entry->read_folio_count[2], __entry->read_folio_count[3],
+		__entry->read_folio_count[4], __entry->read_folio_count[5],
+		__entry->read_folio_count[6], __entry->read_folio_count[7],
+		__entry->read_folio_count[8], __entry->read_folio_count[9],
+		__entry->read_folio_count[10], __entry->read_folio_count[11],
+		__entry->read_folio_count[12], __entry->read_folio_count[13],
+		__entry->read_folio_count[14], __entry->read_folio_count[15])
 );
 
 #ifndef __F2FS_IOSTAT_LATENCY_TYPE
@@ -2440,6 +2556,155 @@ DEFINE_EVENT(f2fs__rw_end, f2fs_datawrite_end,
 	TP_PROTO(struct inode *inode, loff_t offset, int bytes),
 
 	TP_ARGS(inode, offset, bytes)
+);
+
+TRACE_EVENT(f2fs_lock_elapsed_time,
+
+	TP_PROTO(struct f2fs_sb_info *sbi, enum f2fs_lock_name lock_name,
+		bool is_write, struct task_struct *p, int ioprio,
+		unsigned long long total_time,
+		unsigned long long running_time,
+		unsigned long long runnable_time,
+		unsigned long long io_sleep_time,
+		unsigned long long other_time),
+
+	TP_ARGS(sbi, lock_name, is_write, p, ioprio, total_time, running_time,
+		runnable_time, io_sleep_time, other_time),
+
+	TP_STRUCT__entry(
+		__field(dev_t, dev)
+		__array(char, comm, TASK_COMM_LEN)
+		__field(pid_t, pid)
+		__field(int, prio)
+		__field(int, ioprio_class)
+		__field(int, ioprio_data)
+		__field(unsigned int, lock_name)
+		__field(bool, is_write)
+		__field(unsigned long long, total_time)
+		__field(unsigned long long, running_time)
+		__field(unsigned long long, runnable_time)
+		__field(unsigned long long, io_sleep_time)
+		__field(unsigned long long, other_time)
+	),
+
+	TP_fast_assign(
+		__entry->dev		= sbi->sb->s_dev;
+		memcpy(__entry->comm, p->comm, TASK_COMM_LEN);
+		__entry->pid		= p->pid;
+		__entry->prio		= p->prio;
+		__entry->ioprio_class	= IOPRIO_PRIO_CLASS(ioprio);
+		__entry->ioprio_data	= IOPRIO_PRIO_DATA(ioprio);
+		__entry->lock_name	= lock_name;
+		__entry->is_write	= is_write;
+		__entry->total_time	= total_time;
+		__entry->running_time	= running_time;
+		__entry->runnable_time	= runnable_time;
+		__entry->io_sleep_time	= io_sleep_time;
+		__entry->other_time	= other_time;
+	),
+
+	TP_printk("dev = (%d,%d), comm: %s, pid: %d, prio: %d, "
+		"ioprio_class: %d, ioprio_data: %d, lock_name: %s, "
+		"lock_type: %s, total: %llu, running: %llu, "
+		"runnable: %llu, io_sleep: %llu, other: %llu",
+		show_dev(__entry->dev),
+		__entry->comm,
+		__entry->pid,
+		__entry->prio,
+		__entry->ioprio_class,
+		__entry->ioprio_data,
+		show_lock_name(__entry->lock_name),
+		__entry->is_write ? "wlock" : "rlock",
+		__entry->total_time,
+		__entry->running_time,
+		__entry->runnable_time,
+		__entry->io_sleep_time,
+		__entry->other_time)
+);
+
+DECLARE_EVENT_CLASS(f2fs_priority_update,
+
+	TP_PROTO(struct f2fs_sb_info *sbi, enum f2fs_lock_name lock_name,
+		bool is_write, struct task_struct *p, int orig_prio,
+		int new_prio),
+
+	TP_ARGS(sbi, lock_name, is_write, p, orig_prio, new_prio),
+
+	TP_STRUCT__entry(
+		__field(dev_t, dev)
+		__array(char, comm, TASK_COMM_LEN)
+		__field(pid_t, pid)
+		__field(unsigned int, lock_name)
+		__field(bool, is_write)
+		__field(int, orig_prio)
+		__field(int, new_prio)
+	),
+
+	TP_fast_assign(
+		__entry->dev		= sbi->sb->s_dev;
+		memcpy(__entry->comm, p->comm, TASK_COMM_LEN);
+		__entry->pid		= p->pid;
+		__entry->lock_name	= lock_name;
+		__entry->is_write	= is_write;
+		__entry->orig_prio	= orig_prio;
+		__entry->new_prio	= new_prio;
+	),
+
+	TP_printk("dev = (%d,%d), comm: %s, pid: %d, lock_name: %s, "
+		"lock_type: %s, orig_prio: %d, new_prio: %d",
+		show_dev(__entry->dev),
+		__entry->comm,
+		__entry->pid,
+		show_lock_name(__entry->lock_name),
+		__entry->is_write ? "wlock" : "rlock",
+		__entry->orig_prio,
+		__entry->new_prio)
+);
+
+DEFINE_EVENT(f2fs_priority_update, f2fs_priority_uplift,
+
+	TP_PROTO(struct f2fs_sb_info *sbi, enum f2fs_lock_name lock_name,
+		bool is_write, struct task_struct *p, int orig_prio,
+		int new_prio),
+
+	TP_ARGS(sbi, lock_name, is_write, p, orig_prio, new_prio)
+);
+
+DEFINE_EVENT(f2fs_priority_update, f2fs_priority_restore,
+
+	TP_PROTO(struct f2fs_sb_info *sbi, enum f2fs_lock_name lock_name,
+		bool is_write, struct task_struct *p, int orig_prio,
+		int new_prio),
+
+	TP_ARGS(sbi, lock_name, is_write, p, orig_prio, new_prio)
+);
+
+TRACE_EVENT(f2fs_fault_report,
+
+	TP_PROTO(struct super_block *sb, unsigned int err_code,
+		const char *func, unsigned int data),
+
+	TP_ARGS(sb, err_code, func, data),
+
+	TP_STRUCT__entry(
+		__field(dev_t, dev)
+		__field(unsigned int, err_code)
+		__string(func, func)
+		__field(unsigned int, data)
+	),
+
+	TP_fast_assign(
+		__entry->dev		= sb->s_dev;
+		__entry->err_code	= err_code;
+		__assign_str(func);
+		__entry->data		= data;
+	),
+
+	TP_printk("dev = (%d,%d), err_code = %u, func = %s, data = %u",
+		show_dev(__entry->dev),
+		__entry->err_code,
+		__get_str(func),
+		__entry->data)
 );
 
 #endif /* _TRACE_F2FS_H */

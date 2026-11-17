@@ -38,6 +38,45 @@ struct pkvm_module_trng_ops {
 	ANDROID_KABI_RESERVE(2);
 };
 
+struct pkvm_sglist_page {
+	u64	pfn : 40;
+	u8	order;
+} __packed;
+
+enum pkvm_smc_handler_ret {
+	GUEST_SMC_HANDLED,
+	GUEST_SMC_NOT_HANDLED,
+	GUEST_SMC_NEED_TOPUP,
+};
+
+/**
+ * struct pkvm_device_ops - pKVM assigned device callbacks
+ * @reset:      Called before/after devices are assigned.
+ *              Reset is expected to clear any state/secrets on the device and put
+ *              it in quiescent state, where it can't trigger any DMA. If reset
+ *              fails at device assignment to guest, the device won't be assigned.
+ *              Or if it fails on the guest teardown path, that would panic to avoid
+ *              leaking any information. Direction of assignment can be deduced from
+ *              pkvm_device::ctxt where NULL means host to guest and vice versa.
+ * @power_lock: It is expected from this callback to protect or unprotect
+ *              (according to the @lock value) the device against power cycle. This
+ *              is optional on device (un)assignement: @reset can be used for this
+ *              purpose. However it is mandatory to allow guest to dynamically signal
+ *              power on/off.
+ */
+struct pkvm_device_ops {
+	int (*reset)(void *cookie, bool host_to_guest);
+	int (*power_lock)(void *cookie, bool lock);
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+	ANDROID_KABI_RESERVE(5);
+	ANDROID_KABI_RESERVE(6);
+	ANDROID_KABI_RESERVE(7);
+	ANDROID_KABI_RESERVE(8);
+};
+
 /**
  * struct pkvm_module_ops - pKVM modules callbacks
  * @create_private_mapping:	Map a memory region into the hypervisor private
@@ -146,6 +185,9 @@ struct pkvm_module_trng_ops {
  *				is called before remasking SErrors.
  * @host_donate_hyp:		The page @pfn is unmapped from the host and
  *				full control is given to the hypervisor.
+ * @host_donate_sglist_hyp:	Similar to host_donate_hyp but take an array of PFNs
+ *				(kvm_sglist_page) as an argument. This intends to
+ *				batch IOMMU updates.
  * @hyp_donate_host:		The page @pfn whom control has previously been
  *				given to the hypervisor (@host_donate_hyp) is
  *				given back to the host.
@@ -163,11 +205,6 @@ struct pkvm_module_trng_ops {
  *				(@host_unshare_hyp).
  * @memcpy:			Same as kernel memcpy, but use hypervisor VAs.
  * @memset:			Same as kernel memset, but use a hypervisor VA.
- * @hyp_pa:			Return the physical address for a hypervisor
- *				virtual address in the linear range.
- * @hyp_va:			Convert a physical address into a virtual one.
- * @kern_hyp_va:		Convert a kernel virtual address into an
- *				hypervisor virtual one.
  * @hyp_smp_processor_id:	Current CPU id
  * @iommu_donate_pages:		Allocate pages from the IOMMU pool.
  * @iommu_reclaim_pages:	Reclaim pages to the IOMMU pool.
@@ -190,25 +227,17 @@ struct pkvm_module_trng_ops {
  *				successful unmap() operation, so the hypervisor
  *				can track the page state.
  * @init_hvc_pd:		Register a power domain ops.
- * @device_register_reset:	Register a reset callback for devices that is called
- *				before/after devices are assigned. Only one callback
- *				can be registered per device.
- *				Devices are identified by the base address of the MMIO
- *				as defined in the device tree.
- *				Reset is expected to clear any state/secrets on the
- *				device and put it in quiescent state, where it can't
- *				trigger any DMA.
- *				If reset fails at device assignment to guest, the
- *				device won't be assigned.
- *				Or if it fails on the guest teardown path, that would
- *				panic to avoid leaking any information.
- *				Direction of assignment can be deduced from pkvm_device::ctxt
- *				where NULL means host to guest and vice versa.
+ * @device_register_ops		Register a pkvm_device_ops for a device, identified by the
+ *				base address of the MMIO as defined in the device tree.
  * @iommu_register_pviommu_drv:	Register an IOMMU driver to handle guest VMs pvIOMMU
  * @register_guest_trng_ops:    Register a ARM SMCCC TRNG alternative implementation
  *				for pVMs. The @ops.trng_uuid is used to advertise the
  *				identity of TRNG implementation. @ops.trng_rnd64 is used
  *				to generate entropy bits to guest.
+ * @arm_smccc_1_2_smc:		Make an SMCCC v1.2 call to EL3, including processing
+ *				hypervisor exit and entry actions.
+ * @request_hyp_alloc:		Request an alloc request based on current IOMMU context.
+ * @host_stage2_set_owned:	Set the host page ownership state for a range of pages.
  */
 struct pkvm_module_ops {
 	int (*create_private_mapping)(phys_addr_t phys, size_t size,
@@ -233,7 +262,7 @@ struct pkvm_module_ops {
 	int (*host_stage2_mod_prot)(u64 pfn, enum kvm_pgtable_prot prot, u64 nr_pages, bool update_iommu);
 	int (*host_stage2_get_leaf)(phys_addr_t phys, kvm_pte_t *ptep, s8 *level);
 	int (*register_host_smc_handler)(bool (*cb)(struct user_pt_regs *));
-	int (*register_guest_smc_handler)(bool (*cb)(struct arm_smccc_1_2_regs *regs,
+	int (*register_guest_smc_handler)(enum pkvm_smc_handler_ret (*cb)(struct arm_smccc_1_2_regs *regs,
 						     struct arm_smccc_1_2_regs *res,
 						     pkvm_handle_t handle));
 	int (*register_default_trap_handler)(bool (*cb)(struct user_pt_regs *));
@@ -242,6 +271,7 @@ struct pkvm_module_ops {
 	int (*register_hyp_panic_notifier)(void (*cb)(struct user_pt_regs *));
 	int (*register_unmask_serror)(bool (*unmask)(void), void (*mask)(void));
 	int (*host_donate_hyp)(u64 pfn, u64 nr_pages);
+	int (*host_donate_sglist_hyp)(struct pkvm_sglist_page *sglist, size_t nr_pages);
 	int (*hyp_donate_host)(u64 pfn, u64 nr_pages);
 	int (*host_share_hyp)(u64 pfn);
 	int (*host_unshare_hyp)(u64 pfn);
@@ -249,12 +279,9 @@ struct pkvm_module_ops {
 	void (*unpin_shared_mem)(void *from, void *to);
 	void* (*memcpy)(void *to, const void *from, size_t count);
 	void* (*memset)(void *dst, int c, size_t count);
-	phys_addr_t (*hyp_pa)(void *x);
-	void* (*hyp_va)(phys_addr_t phys);
-	unsigned long (*kern_hyp_va)(unsigned long x);
 	void* (*tracing_reserve_entry)(unsigned long length);
 	void (*tracing_commit_entry)(void);
-	void (*tracing_mod_hyp_printk)(u8 fmt_id, u64 a, u64 b, u64 c, u64 d);
+	void (*tracing_mod_hyp_printk)(u16 fmt_id, u64 a, u64 b, u64 c, u64 d);
 	int (*map_module_pages)(u64 pfn, void *va, u64 nr_pages,
 				    enum kvm_pgtable_prot prot, bool is_protected);
 	int (*unmap_module_pages)(u64 pfn, void *va, u64 nr_pages);
@@ -281,11 +308,16 @@ struct pkvm_module_ops {
 	int (*pkvm_use_dma)(phys_addr_t phys_addr, size_t size);
 	int (*pkvm_unuse_dma)(phys_addr_t phys_addr, size_t size);
 	int (*init_hvc_pd)(struct kvm_power_domain *pd, const struct kvm_power_domain_ops *ops);
-	int (*device_register_reset)(u64 phys, void *cookie,
-				     int (*cb)(void *cookie, bool host_to_guest));
+	int (*device_register_ops)(u64 phys, struct pkvm_device_ops *ops, void *cookie);
 	int (*iommu_register_pviommu_drv)(pkvm_handle_t drv_id);
 	int (*register_guest_trng_ops)(const struct pkvm_module_trng_ops *ops);
-	ANDROID_KABI_RESERVE(1);
+	int (*guest_accept_module_prot_page)(u64 ipa, u64 nr_pages);
+	int (*register_guest_accept_module_owned_handler)(int (*cb)(u64 phys, u64 ipa, u64 size,
+								   pkvm_handle_t handle));
+	void (*arm_smccc_1_2_smc)(struct arm_smccc_1_2_regs *args,
+				  struct arm_smccc_1_2_regs *regs);
+	int (*request_hyp_alloc)(void);
+	ANDROID_KABI_USE(1, int (*host_stage2_set_owned)(u64 pfn, u64 nr_pages, bool owned));
 	ANDROID_KABI_RESERVE(2);
 	ANDROID_KABI_RESERVE(3);
 	ANDROID_KABI_RESERVE(4);

@@ -21,6 +21,7 @@
 #include <asm/daifflags.h>
 #include <asm/esr.h>
 #include <asm/exception.h>
+#include <asm/fpsimd.h>
 #include <asm/irq_regs.h>
 #include <asm/kprobes.h>
 #include <asm/mmu.h>
@@ -31,6 +32,7 @@
 #include <asm/system_misc.h>
 
 #include <trace/hooks/traps.h>
+#include <trace/hooks/gic.h>
 
 /*
  * Handle IRQ/context state management when entering from kernel mode.
@@ -86,6 +88,7 @@ static __always_inline void __enter_from_user_mode(struct pt_regs *regs)
 {
 	enter_from_user_mode(regs);
 	mte_disable_tco_entry(current);
+	sme_enter_from_user_mode();
 }
 
 static __always_inline void arm64_enter_from_user_mode(struct pt_regs *regs)
@@ -104,6 +107,7 @@ static __always_inline void arm64_exit_to_user_mode(struct pt_regs *regs)
 	local_irq_disable();
 	exit_to_user_mode_prepare(regs);
 	local_daif_mask();
+	sme_exit_to_user_mode();
 	mte_check_tfsr_exit();
 	exit_to_user_mode();
 }
@@ -313,10 +317,45 @@ static void debug_exception_exit(struct pt_regs *regs)
 }
 NOKPROBE_SYMBOL(debug_exception_exit);
 
-UNHANDLED(el1t, 64, sync)
-UNHANDLED(el1t, 64, irq)
-UNHANDLED(el1t, 64, fiq)
-UNHANDLED(el1t, 64, error)
+static void noinstr el1t_64_check_overflow_stack(struct pt_regs *regs)
+{
+	unsigned long sp = kernel_stack_pointer(regs) - sizeof(*regs);
+	unsigned long ovf_stack = (unsigned long)this_cpu_ptr(overflow_stack);
+
+	/*
+	 * We're in big trouble if we've overflowed the overflow stack
+	 * so perform a best-effort check before we proceed. If our SP
+	 * is outside of the overflow stack for this CPU then presumably
+	 * we're already corrupting memory, so park ourselves here in an
+	 * attempt to contain the damage.
+	 */
+	if (sp < ovf_stack || sp > ovf_stack + OVERFLOW_STACK_SIZE)
+		cpu_park_loop();
+}
+
+asmlinkage void noinstr el1t_64_sync_handler(struct pt_regs *regs)
+{
+	el1t_64_check_overflow_stack(regs);
+	el1h_64_sync_handler(regs);
+}
+
+asmlinkage void noinstr el1t_64_irq_handler(struct pt_regs *regs)
+{
+	el1t_64_check_overflow_stack(regs);
+	el1h_64_irq_handler(regs);
+}
+
+asmlinkage void noinstr el1t_64_fiq_handler(struct pt_regs *regs)
+{
+	el1t_64_check_overflow_stack(regs);
+	el1h_64_fiq_handler(regs);
+}
+
+asmlinkage void noinstr el1t_64_error_handler(struct pt_regs *regs)
+{
+	el1t_64_check_overflow_stack(regs);
+	el1h_64_error_handler(regs);
+}
 
 static void noinstr el1_abort(struct pt_regs *regs, unsigned long esr)
 {
@@ -542,6 +581,7 @@ asmlinkage void noinstr el1h_64_irq_handler(struct pt_regs *regs)
 
 asmlinkage void noinstr el1h_64_fiq_handler(struct pt_regs *regs)
 {
+	trace_android_rvh_fiq_dump(regs);
 	el1_interrupt(regs, handle_arch_fiq);
 }
 
@@ -681,7 +721,19 @@ static void noinstr el0_inv(struct pt_regs *regs, unsigned long esr)
 {
 	arm64_enter_from_user_mode(regs);
 	local_daif_restore(DAIF_PROCCTX);
-	bad_el0_sync(regs, 0, esr);
+
+	/*
+	 * Fire the vendor hook for all unrecognised EL0 sync exceptions.
+	 * Vendor drivers check EC/IL themselves and set *handled = true
+	 * for opcodes they handle. If no handler is installed or the opcode
+	 * is unknown, bad_el0_sync() delivers SIGILL as usual.
+	 */
+	bool handled = false;
+
+	trace_android_rvh_el0_impdef_exception(regs, esr, &handled);
+	if (!handled)
+		bad_el0_sync(regs, 0, esr);
+
 	arm64_exit_to_user_mode(regs);
 }
 
@@ -861,6 +913,7 @@ static void noinstr __el0_fiq_handler_common(struct pt_regs *regs)
 
 asmlinkage void noinstr el0t_64_fiq_handler(struct pt_regs *regs)
 {
+	trace_android_rvh_fiq_dump(regs);
 	__el0_fiq_handler_common(regs);
 }
 

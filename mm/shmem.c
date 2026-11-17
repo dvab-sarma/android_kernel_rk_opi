@@ -42,6 +42,7 @@
 #include <linux/iversion.h>
 #include <linux/unicode.h>
 #include <linux/mm_inline.h>
+#include <linux/page_size_compat.h>
 #include "swap.h"
 
 #undef CREATE_TRACE_POINTS
@@ -91,8 +92,8 @@ static struct vfsmount *shm_mnt __ro_after_init;
 
 #include "internal.h"
 
-#ifdef CONFIG_MEMFD_ASHMEM_SHIM
-#include "memfd-ashmem-shim.h"
+#ifdef CONFIG_ASHMEM
+#include "../drivers/staging/android/ashmem.h"
 #endif
 
 #define VM_ACCT(size)    (PAGE_ALIGN(size) >> PAGE_SHIFT)
@@ -915,6 +916,7 @@ static int shmem_add_to_page_cache(struct folio *folio,
 			goto unlock;
 		shmem_update_stats(folio, nr);
 		mapping->nrpages += nr;
+		trace_android_vh_shmem_mod_shmem(folio->mapping, nr);
 unlock:
 		xas_unlock_irq(&xas);
 	} while (xas_nomem(&xas, gfp));
@@ -939,6 +941,7 @@ static void shmem_delete_from_page_cache(struct folio *folio, void *radswap)
 
 	xa_lock_irq(&mapping->i_pages);
 	error = shmem_replace_entry(mapping, folio->index, folio, radswap);
+	trace_android_vh_shmem_mod_shmem(folio->mapping, -nr);
 	folio->mapping = NULL;
 	mapping->nrpages -= nr;
 	shmem_update_stats(folio, -nr);
@@ -953,17 +956,29 @@ static void shmem_delete_from_page_cache(struct folio *folio, void *radswap)
  * being freed).
  */
 static long shmem_free_swap(struct address_space *mapping,
-			    pgoff_t index, void *radswap)
+			    pgoff_t index, pgoff_t end, void *radswap)
 {
-	int order = xa_get_order(&mapping->i_pages, index);
-	void *old;
+	XA_STATE(xas, &mapping->i_pages, index);
+	unsigned int nr_pages = 0;
+	pgoff_t base;
+	void *entry;
 
-	old = xa_cmpxchg_irq(&mapping->i_pages, index, radswap, NULL, 0);
-	if (old != radswap)
-		return 0;
-	free_swap_and_cache_nr(radix_to_swp_entry(radswap), 1 << order);
+	xas_lock_irq(&xas);
+	entry = xas_load(&xas);
+	if (entry == radswap) {
+		nr_pages = 1 << xas_get_order(&xas);
+		base = round_down(xas.xa_index, nr_pages);
+		if (base < index || base + nr_pages - 1 > end)
+			nr_pages = 0;
+		else
+			xas_store(&xas, NULL);
+	}
+	xas_unlock_irq(&xas);
 
-	return 1 << order;
+	if (nr_pages)
+		free_swap_and_cache_nr(radix_to_swp_entry(radswap), nr_pages);
+
+	return nr_pages;
 }
 
 /*
@@ -1115,8 +1130,8 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 			if (xa_is_value(folio)) {
 				if (unfalloc)
 					continue;
-				nr_swaps_freed += shmem_free_swap(mapping,
-							indices[i], folio);
+				nr_swaps_freed += shmem_free_swap(mapping, indices[i],
+								  end - 1, folio);
 				continue;
 			}
 
@@ -1182,14 +1197,30 @@ whole_folios:
 			folio = fbatch.folios[i];
 
 			if (xa_is_value(folio)) {
+				int order;
 				long swaps_freed;
 
 				if (unfalloc)
 					continue;
-				swaps_freed = shmem_free_swap(mapping, indices[i], folio);
+				swaps_freed = shmem_free_swap(mapping, indices[i],
+							      end - 1, folio);
 				if (!swaps_freed) {
-					/* Swap was replaced by page: retry */
-					index = indices[i];
+					pgoff_t base = indices[i];
+
+					order = shmem_confirm_swap(mapping, indices[i],
+								   radix_to_swp_entry(folio));
+					/*
+					 * If found a large swap entry cross the end or start
+					 * border, skip it as the truncate_inode_partial_folio
+					 * above should have at least zerod its content once.
+					 */
+					if (order > 0) {
+						base = round_down(base, 1 << order);
+						if (base < start || base + (1 << order) > end)
+							continue;
+					}
+					/* Swap was replaced by page or extended, retry */
+					index = base;
 					break;
 				}
 				nr_swaps_freed += swaps_freed;
@@ -1233,6 +1264,7 @@ whole_folios:
 	}
 
 	shmem_recalc_inode(inode, 0, -nr_swaps_freed);
+	trace_android_vh_shmem_mod_swapped(mapping, -nr_swaps_freed);
 }
 
 void shmem_truncate_range(struct inode *inode, loff_t lstart, loff_t lend)
@@ -1644,6 +1676,7 @@ try_split:
 			spin_unlock(&shmem_swaplist_lock);
 		}
 
+		trace_android_vh_shmem_mod_swapped(folio->mapping, nr_pages);
 		swap_shmem_alloc(folio->swap, nr_pages);
 		shmem_delete_from_page_cache(folio, swp_to_radix_entry(folio->swap));
 
@@ -1876,7 +1909,7 @@ static struct folio *shmem_alloc_folio(gfp_t gfp, int order,
 	struct folio *folio = NULL;
 
 	mpol = shmem_get_pgoff_policy(info, index, order, &ilx);
-	trace_android_rvh_shmem_get_folio(info, &folio);
+	trace_android_rvh_shmem_get_folio(info, &folio, order);
 	if (folio)
 		goto done;
 	folio = folio_alloc_mpol(gfp, order, mpol, ilx, numa_node_id());
@@ -1905,6 +1938,8 @@ static struct folio *shmem_alloc_and_add_folio(struct vm_fault *vmf,
 		suitable_orders = shmem_suitable_orders(inode, vmf,
 							mapping, index, orders);
 
+		trace_android_rvh_shmem_suitable_orders(inode, index,
+							orders, &suitable_orders);
 		order = highest_order(suitable_orders);
 		while (suitable_orders) {
 			pages = 1UL << order;
@@ -1990,11 +2025,14 @@ unlock:
 	return ERR_PTR(error);
 }
 
+static DECLARE_WAIT_QUEUE_HEAD(shmem_swapcache_wq);
+
 static struct folio *shmem_swap_alloc_folio(struct inode *inode,
 		struct vm_area_struct *vma, pgoff_t index,
 		swp_entry_t entry, int order, gfp_t gfp)
 {
 	struct shmem_inode_info *info = SHMEM_I(inode);
+	DECLARE_WAITQUEUE(wait, current);
 	int nr_pages = 1 << order;
 	struct folio *new;
 	gfp_t alloc_gfp;
@@ -2051,6 +2089,10 @@ retry:
 	if (swapcache_prepare(entry, nr_pages)) {
 		folio_put(new);
 		new = ERR_PTR(-EEXIST);
+		/* Relax a bit to prevent rapid repeated page faults */
+		add_wait_queue(&shmem_swapcache_wq, &wait);
+		schedule_timeout_uninterruptible(1);
+		remove_wait_queue(&shmem_swapcache_wq, &wait);
 		/* Try smaller folio to avoid cache conflict */
 		goto fallback;
 	}
@@ -2371,6 +2413,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 	 * and swap cache folios are never partially freed.
 	 */
 	folio_lock(folio);
+	trace_android_vh_shmem_swapin_folio(folio);
 	if ((!skip_swapcache && !folio_test_swapcache(folio)) ||
 	    shmem_confirm_swap(mapping, index, swap) < 0 ||
 	    folio->swap.val != swap.val) {
@@ -2401,6 +2444,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 		goto failed;
 
 	shmem_recalc_inode(inode, 0, -nr_pages);
+	trace_android_vh_shmem_mod_swapped(folio->mapping, -nr_pages);
 
 	if (sgp == SGP_WRITE)
 		folio_mark_accessed(folio);
@@ -2408,6 +2452,8 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 	if (skip_swapcache) {
 		folio->swap.val = 0;
 		swapcache_clear(si, swap, nr_pages);
+		if (waitqueue_active(&shmem_swapcache_wq))
+			wake_up(&shmem_swapcache_wq);
 	} else {
 		swap_cache_del_folio(folio);
 	}
@@ -2427,8 +2473,11 @@ unlock:
 	if (folio)
 		folio_unlock(folio);
 failed_nolock:
-	if (skip_swapcache)
+	if (skip_swapcache) {
 		swapcache_clear(si, folio->swap, folio_nr_pages(folio));
+		if (waitqueue_active(&shmem_swapcache_wq))
+			wake_up(&shmem_swapcache_wq);
+	}
 	if (folio)
 		folio_put(folio);
 	put_swap_device(si);
@@ -2528,6 +2577,13 @@ repeat:
 
 	/* Find hugepage orders that are allowed for anonymous shmem and tmpfs. */
 	orders = shmem_allowable_huge_orders(inode, vma, index, write_end, false);
+	trace_android_rvh_shmem_allowable_huge_orders(inode, index, vma, &orders);
+	/*
+	 * With the above hook `order` is not always 0 anymore and the following
+	 * if block does not get compiled out. With CONFIG_TRANSPARENT_HUGEPAGE=n
+	 * vma_thp_gfp_mask() becomes undefined and linker fails.
+	 */
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	if (orders > 0) {
 		gfp_t huge_gfp;
 
@@ -2544,6 +2600,7 @@ repeat:
 		if (PTR_ERR(folio) == -EEXIST)
 			goto repeat;
 	}
+#endif
 
 	folio = shmem_alloc_and_add_folio(vmf, gfp, inode, index, fault_mm, 0);
 	if (IS_ERR(folio)) {
@@ -2554,7 +2611,9 @@ repeat:
 		goto unlock;
 	}
 
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
 alloced:
+#endif
 	alloced = true;
 	if (folio_test_large(folio) &&
 	    DIV_ROUND_UP(i_size_read(inode), PAGE_SIZE) <
@@ -2734,6 +2793,15 @@ static vm_fault_t shmem_fault(struct vm_fault *vmf)
 	struct folio *folio = NULL;
 	vm_fault_t ret = 0;
 	int err;
+	pgoff_t max_idx;
+
+	max_idx = DIV_ROUND_UP(i_size_read(inode), __PAGE_SIZE) * (__PAGE_SIZE / PAGE_SIZE);
+	if (unlikely(vmf->pgoff >= max_idx))
+		return VM_FAULT_SIGBUS;
+
+	max_idx = DIV_ROUND_UP(i_size_read(inode), PAGE_SIZE);
+	if (unlikely(vmf->pgoff >= max_idx))
+		return VM_FAULT_NEED_ANONPAGE;
 
 	/*
 	 * Trinity finds that probing a hole which tmpfs is punching can
@@ -4053,6 +4121,7 @@ static int shmem_rename2(struct mnt_idmap *idmap,
 {
 	struct inode *inode = d_inode(old_dentry);
 	int they_are_dirs = S_ISDIR(inode->i_mode);
+	bool had_offset = false;
 	int error;
 
 	if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT))
@@ -4065,16 +4134,23 @@ static int shmem_rename2(struct mnt_idmap *idmap,
 	if (!simple_empty(new_dentry))
 		return -ENOTEMPTY;
 
-	if (flags & RENAME_WHITEOUT) {
-		error = shmem_whiteout(idmap, old_dir, old_dentry);
-		if (error)
-			return error;
-	}
-
-	error = simple_offset_rename(old_dir, old_dentry, new_dir, new_dentry);
-	if (error)
+	error = simple_offset_add(shmem_get_offset_ctx(new_dir), new_dentry);
+	if (error == -EBUSY)
+		had_offset = true;
+	else if (unlikely(error))
 		return error;
 
+	if (flags & RENAME_WHITEOUT) {
+		error = shmem_whiteout(idmap, old_dir, old_dentry);
+		if (error) {
+			if (!had_offset)
+				simple_offset_remove(shmem_get_offset_ctx(new_dir),
+						     new_dentry);
+			return error;
+		}
+	}
+
+	simple_offset_rename(old_dir, old_dentry, new_dir, new_dentry);
 	if (d_really_is_positive(new_dentry)) {
 		(void) shmem_unlink(new_dir, new_dentry);
 		if (they_are_dirs) {
@@ -5218,8 +5294,13 @@ static const struct address_space_operations shmem_aops = {
 	.error_remove_folio = shmem_error_remove_folio,
 };
 
-#ifdef CONFIG_ASHMEM_RUST
-extern long ashmem_memfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+#ifdef CONFIG_ASHMEM
+static long shmem_ashmem_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	if (!(SHMEM_I(file_inode(file))->flags & SHMEM_FL_MEMFD))
+		return -ENOTTY;
+	return ashmem_memfd_ioctl(file, cmd, arg);
+}
 #endif
 
 static const struct file_operations shmem_file_operations = {
@@ -5235,15 +5316,10 @@ static const struct file_operations shmem_file_operations = {
 	.splice_write	= iter_file_splice_write,
 	.fallocate	= shmem_fallocate,
 #endif
-#ifdef CONFIG_MEMFD_ASHMEM_SHIM
-	.unlocked_ioctl	= memfd_ashmem_shim_ioctl,
+#ifdef CONFIG_ASHMEM
+	.unlocked_ioctl	= shmem_ashmem_ioctl,
 #ifdef CONFIG_COMPAT
-	.compat_ioctl	= memfd_ashmem_shim_compat_ioctl,
-#endif
-#elif defined CONFIG_ASHMEM_RUST
-	.unlocked_ioctl = ashmem_memfd_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl = ashmem_memfd_ioctl,
+	.compat_ioctl	= shmem_ashmem_ioctl,
 #endif
 #endif
 };

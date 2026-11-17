@@ -18,6 +18,7 @@
 #include <linux/shmem_fs.h>
 #include <linux/hugetlb.h>
 #include <linux/pgtable.h>
+#include <linux/page_size_compat.h>
 
 #include <linux/uaccess.h>
 #include "swap.h"
@@ -53,11 +54,6 @@ static unsigned char mincore_swap(swp_entry_t entry, bool shmem)
 	struct folio *folio = NULL;
 	unsigned char present = 0;
 
-	if (!IS_ENABLED(CONFIG_SWAP)) {
-		WARN_ON(1);
-		return 0;
-	}
-
 	/*
 	 * Shmem mapping may contain swapin error entries, which are
 	 * absent. Page table may contain migration or hwpoison
@@ -65,6 +61,11 @@ static unsigned char mincore_swap(swp_entry_t entry, bool shmem)
 	 */
 	if (non_swap_entry(entry))
 		return !shmem;
+
+	if (!IS_ENABLED(CONFIG_SWAP)) {
+		WARN_ON(1);
+		return 0;
+	}
 
 	/*
 	 * Shmem mapping lookup is lockless, so we need to grab the swap
@@ -214,8 +215,7 @@ static inline bool can_do_mincore(struct vm_area_struct *vma)
 	 * for writing; otherwise we'd be including shared non-exclusive
 	 * mappings, which opens a side channel.
 	 */
-	return inode_owner_or_capable(&nop_mnt_idmap,
-				      file_inode(vma->vm_file)) ||
+	return file_owner_or_capable(vma->vm_file) ||
 	       file_permission(vma->vm_file, MAY_WRITE) == 0;
 }
 
@@ -252,6 +252,20 @@ static long do_mincore(unsigned long addr, unsigned long pages, unsigned char *v
 	return (end - addr) >> PAGE_SHIFT;
 }
 
+static inline void __collapse_mincore_result(unsigned char *src_vec,
+					     unsigned char *res_vec,
+					     unsigned long pages,
+					     unsigned long nr_subpages)
+{
+	unsigned long i;
+
+	if (nr_subpages == 1)
+		return;
+
+	for (i = 0; i < pages; i++)
+		res_vec[i / nr_subpages] |= src_vec[i];
+}
+
 /*
  * The mincore(2) system call.
  *
@@ -282,11 +296,13 @@ SYSCALL_DEFINE3(mincore, unsigned long, start, size_t, len,
 	long retval;
 	unsigned long pages;
 	unsigned char *tmp;
+	unsigned char *res;
+	unsigned long nr_subpages = __PAGE_SIZE / PAGE_SIZE;
 
 	start = untagged_addr(start);
 
 	/* Check the start address: needs to be page-aligned.. */
-	if (unlikely(start & ~PAGE_MASK))
+	if (unlikely(start & ~__PAGE_MASK))
 		return -EINVAL;
 
 	/* ..and we need to be passed a valid user-space range */
@@ -297,12 +313,21 @@ SYSCALL_DEFINE3(mincore, unsigned long, start, size_t, len,
 	pages = len >> PAGE_SHIFT;
 	pages += (offset_in_page(len)) != 0;
 
-	if (!access_ok(vec, pages))
+	if (!access_ok(vec, pages / nr_subpages))
 		return -EFAULT;
 
 	tmp = (void *) __get_free_page(GFP_USER);
 	if (!tmp)
 		return -EAGAIN;
+
+	if (unlikely(nr_subpages > 1)) {
+		res = (void *) __get_free_page(GFP_USER|__GFP_ZERO);
+		if (!res) {
+			free_page((unsigned long) tmp);
+			return -EAGAIN;
+		}
+	} else
+		res = tmp;
 
 	retval = 0;
 	while (pages) {
@@ -316,15 +341,28 @@ SYSCALL_DEFINE3(mincore, unsigned long, start, size_t, len,
 
 		if (retval <= 0)
 			break;
-		if (copy_to_user(vec, tmp, retval)) {
+
+		__collapse_mincore_result(tmp, res, retval, nr_subpages);
+
+		if (copy_to_user(vec, res, retval / nr_subpages)) {
 			retval = -EFAULT;
 			break;
 		}
+
+		/*
+		 * If emulating the page size, clear the old results, to avoid
+		 * corrupting the next __collapse_mincore_result()
+		 */
+		if (nr_subpages > 1)
+			memset(res, 0, retval / nr_subpages);
+
 		pages -= retval;
-		vec += retval;
+		vec += retval / nr_subpages;
 		start += retval << PAGE_SHIFT;
 		retval = 0;
 	}
+	if (unlikely(nr_subpages > 1))
+		free_page((unsigned long) res);
 	free_page((unsigned long) tmp);
 	return retval;
 }

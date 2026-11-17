@@ -190,6 +190,8 @@ static void tell_host(struct virtio_balloon *vb, struct virtqueue *vq)
 
 	sg_init_one(&sg, vb->pfns, sizeof(vb->pfns[0]) * vb->num_pfns);
 
+	post_page_relinquish_tlb_inv();
+
 	/* We should always be able to add one buffer to an empty queue. */
 	virtqueue_add_outbuf(vq, &sg, 1, vb, GFP_KERNEL);
 	virtqueue_kick(vq);
@@ -221,6 +223,8 @@ static int virtballoon_free_page_report(struct page_reporting_dev_info *pr_dev_i
 	 */
 	if (WARN_ON_ONCE(err))
 		return err;
+
+	post_page_relinquish_tlb_inv();
 
 	virtqueue_kick(vq);
 
@@ -856,6 +860,7 @@ static int virtballoon_migratepage(struct balloon_dev_info *vb_dev_info,
 		return -EAGAIN;
 
 	get_page(newpage); /* balloon reference */
+	page_relinquish(newpage, 1);
 
 	/*
 	  * When we migrate a page to a different zone and adjusted the
@@ -1230,8 +1235,8 @@ static int virtballoon_restore(struct virtio_device *vdev)
 
 static int virtballoon_validate(struct virtio_device *vdev)
 {
-	if (WARN_ON(page_relinquish_disallowed()))
-		return -EINVAL;
+	if (page_relinquish_disallowed())
+		return -ENODEV;
 
 	/*
 	 * Inform the hypervisor that our pages are poisoned or

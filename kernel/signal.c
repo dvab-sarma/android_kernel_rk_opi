@@ -64,9 +64,12 @@
 
 #undef CREATE_TRACE_POINTS
 #include <trace/hooks/signal.h>
+#include <trace/hooks/dtask.h>
 /*
  * SLAB caches for signal bits.
  */
+
+EXPORT_TRACEPOINT_SYMBOL_GPL(signal_generate);
 
 static struct kmem_cache *sigqueue_cachep;
 
@@ -967,6 +970,7 @@ static void complete_signal(int sig, struct task_struct *p, enum pid_type type)
 {
 	struct signal_struct *signal = p->signal;
 	struct task_struct *t;
+	bool wake;
 
 	/*
 	 * Now find a thread we can wake up to take the signal off the queue.
@@ -1024,7 +1028,10 @@ static void complete_signal(int sig, struct task_struct *p, enum pid_type type)
 				trace_android_vh_exit_signal(t);
 				task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
 				sigaddset(&t->pending.signal, SIGKILL);
-				signal_wake_up(t, 1);
+				wake = true;
+				trace_android_vh_exit_signal_whether_wake(t, &wake);
+				if (wake)
+					signal_wake_up(t, 1);
 			}
 			return;
 		}
@@ -1344,6 +1351,7 @@ int zap_other_threads(struct task_struct *p)
 	int count = 0;
 
 	p->signal->group_stop_count = 0;
+	task_clear_jobctl_pending(p, JOBCTL_PENDING_MASK);
 
 	for_other_threads(p, t) {
 		task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
@@ -1367,8 +1375,16 @@ struct sighand_struct *__lock_task_sighand(struct task_struct *tsk,
 	rcu_read_lock();
 	for (;;) {
 		sighand = rcu_dereference(tsk->sighand);
-		if (unlikely(sighand == NULL))
+		if (unlikely(sighand == NULL)) {
+			/*
+			 * Pairs with the smp_store_release() in
+			 * __exit_signal().  It ensures that all state
+			 * modifications to the task preceeding the store are
+			 * visible to the callers of lock_task_sighand().
+			 */
+			smp_acquire__after_ctrl_dep();
 			break;
+		}
 
 		/*
 		 * This sighand can be already freed and even reused, but

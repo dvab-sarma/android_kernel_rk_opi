@@ -8,13 +8,12 @@ use kernel::{
     bindings,
     error::{from_err_ptr, to_result, Result},
     ffi::{c_int, c_ulong},
-    fs::file::{File, LocalFile},
+    fs::file::{File, LocalFile, Offset},
     iov::IovIterDest,
-    miscdevice::loff_t,
     mm::virt::{vm_flags_t, VmaNew},
     prelude::*,
     str::CStr,
-    types::ARef,
+    types::{ARef, Opaque},
 };
 
 use core::{
@@ -25,7 +24,7 @@ use core::{
 /// # Safety
 ///
 /// Caller must ensure that access to the file position is properly synchronized.
-pub(crate) unsafe fn file_get_fpos(file: &LocalFile) -> loff_t {
+pub(crate) unsafe fn file_get_fpos(file: &LocalFile) -> Offset {
     // SAFETY: Caller ensures that this is okay.
     unsafe { (*file.as_ptr()).f_pos }
 }
@@ -33,7 +32,7 @@ pub(crate) unsafe fn file_get_fpos(file: &LocalFile) -> loff_t {
 /// # Safety
 ///
 /// Caller must ensure that access to the file position is properly synchronized.
-pub(crate) unsafe fn file_set_fpos(file: &LocalFile, pos: loff_t) {
+pub(crate) unsafe fn file_set_fpos(file: &LocalFile, pos: Offset) {
     // SAFETY: Caller ensures that this is okay.
     unsafe { (*file.as_ptr()).f_pos = pos };
 }
@@ -87,7 +86,7 @@ impl ShmemFile {
         &self.inner
     }
 
-    pub(crate) fn vfs_llseek(&self, offset: loff_t, whence: c_int) -> Result<loff_t> {
+    pub(crate) fn vfs_llseek(&self, offset: Offset, whence: c_int) -> Result<Offset> {
         // SAFETY: Just an FFI call. The file is valid.
         let ret = unsafe { bindings::vfs_llseek(self.inner.as_ptr(), offset, whence) };
 
@@ -101,15 +100,15 @@ impl ShmemFile {
     pub(crate) fn vfs_iter_read(
         &self,
         iov: &mut IovIterDest<'_>,
-        pos: &mut loff_t,
-    ) -> Result<loff_t> {
+        pos: &mut Offset,
+    ) -> Result<Offset> {
         // SAFETY: Just an FFI call. The file and iov is valid.
         let ret = unsafe { bindings::vfs_iter_read(self.inner.as_ptr(), iov.as_raw(), pos, 0) };
 
         if ret < 0 {
             Err(Error::from_errno(ret as i32))
         } else {
-            Ok(ret as loff_t)
+            Ok(ret as Offset)
         }
     }
 
@@ -243,4 +242,48 @@ unsafe extern "C" fn ashmem_vmfile_get_unmapped_area(
     let mm = unsafe { (*bindings::get_current()).mm };
     // SAFETY: This calls the right get_unmapped_area for a shmem.
     unsafe { bindings::mm_get_unmapped_area(mm, file, addr, len, pgoff, flags) }
+}
+
+#[pin_data(PinnedDrop)]
+pub(crate) struct DentryNameSnapshot {
+    #[pin]
+    snapshot: Opaque<bindings::name_snapshot>,
+}
+
+impl DentryNameSnapshot {
+    pub(crate) fn new(file: &File) -> impl PinInit<Self, core::convert::Infallible> + '_ {
+        pin_init!(Self {
+            snapshot <- Opaque::ffi_init(move |ptr| {
+                let file_ptr = file.as_ptr();
+                // SAFETY: It's safe to access a file's dentry.
+                let dentry = unsafe { (*file_ptr).__bindgen_anon_1.f_path.dentry };
+                // SAFETY: ptr is valid for writing. dentry is valid by safety requirements.
+                unsafe { bindings::take_dentry_name_snapshot(ptr, dentry) };
+            }),
+        })
+    }
+}
+
+impl core::ops::Deref for DentryNameSnapshot {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        let snapshot_ptr = self.snapshot.get();
+        // SAFETY: The snapshot is initialized and valid.
+        unsafe {
+            core::slice::from_raw_parts(
+                (*snapshot_ptr).name.name,
+                (*snapshot_ptr).name.__bindgen_anon_1.__bindgen_anon_1.len as usize,
+            )
+        }
+    }
+}
+
+#[pinned_drop]
+impl PinnedDrop for DentryNameSnapshot {
+    fn drop(self: Pin<&mut Self>) {
+        let snapshot_ptr = self.snapshot.get();
+        // SAFETY: This snapshot is valid.
+        unsafe { bindings::release_dentry_name_snapshot(snapshot_ptr) };
+    }
 }

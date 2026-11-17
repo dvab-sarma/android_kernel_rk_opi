@@ -75,11 +75,13 @@ notrace struct clock_read_data *sched_clock_read_begin(unsigned int *seq)
 	*seq = read_seqcount_latch(&cd.seq);
 	return cd.read_data + (*seq & 1);
 }
+EXPORT_SYMBOL_GPL(sched_clock_read_begin);
 
 notrace int sched_clock_read_retry(unsigned int seq)
 {
 	return read_seqcount_latch_retry(&cd.seq, seq);
 }
+EXPORT_SYMBOL_GPL(sched_clock_read_retry);
 
 static __always_inline unsigned long long __sched_clock(void)
 {
@@ -216,7 +218,7 @@ void sched_clock_register(u64 (*read)(void), int bits, unsigned long rate)
 
 	update_clock_read_data(&rd);
 
-	if (sched_clock_timer.function != NULL) {
+	if (ACCESS_PRIVATE(&sched_clock_timer, function) != NULL) {
 		/* update timeout for clock wrap */
 		hrtimer_start(&sched_clock_timer, cd.wrap_kt,
 			      HRTIMER_MODE_REL_HARD);

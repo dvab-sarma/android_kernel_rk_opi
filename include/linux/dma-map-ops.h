@@ -9,6 +9,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/pgtable.h>
 #include <linux/slab.h>
+#include <linux/android_kabi.h>
 
 struct cma;
 struct iommu_ops;
@@ -68,6 +69,11 @@ struct dma_map_ops {
 	size_t (*max_mapping_size)(struct device *dev);
 	size_t (*opt_mapping_size)(void);
 	unsigned long (*get_merge_boundary)(struct device *dev);
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 #ifdef CONFIG_ARCH_HAS_DMA_OPS
@@ -366,6 +372,12 @@ static inline void arch_sync_dma_for_cpu(phys_addr_t paddr, size_t size,
 {
 }
 #endif /* ARCH_HAS_SYNC_DMA_FOR_CPU */
+
+#ifndef CONFIG_ARCH_HAS_BATCHED_DMA_SYNC
+static inline void arch_sync_dma_flush(void)
+{
+}
+#endif
 
 #ifdef CONFIG_ARCH_HAS_SYNC_DMA_FOR_CPU_ALL
 void arch_sync_dma_for_cpu_all(void);

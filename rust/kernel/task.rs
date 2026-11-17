@@ -204,23 +204,18 @@ impl Task {
         self.0.get()
     }
 
-    /// Returns the group leader of the given task.
-    pub fn group_leader(&self) -> &Task {
-        // SAFETY: The group leader of a task never changes after initialization, so reading this
-        // field is not a data race.
-        let ptr = unsafe { *ptr::addr_of!((*self.as_ptr()).group_leader) };
-
-        // SAFETY: The lifetime of the returned task reference is tied to the lifetime of `self`,
-        // and given that a task has a reference to its group leader, we know it must be valid for
-        // the lifetime of the returned task reference.
-        unsafe { &*ptr.cast() }
-    }
-
     /// Returns the PID of the given task.
     pub fn pid(&self) -> Pid {
         // SAFETY: The pid of a task never changes after initialization, so reading this field is
         // not a data race.
         unsafe { *ptr::addr_of!((*self.as_ptr()).pid) }
+    }
+
+    /// Returns the TGID (Thread Group ID / Process ID) of the given task.
+    pub fn tgid(&self) -> Pid {
+        // SAFETY: The tgid of a task never changes after initialization, so reading this field is
+        // not a data race.
+        unsafe { *ptr::addr_of!((*self.as_ptr()).tgid) }
     }
 
     /// Returns the UID of the given task.
@@ -280,6 +275,92 @@ impl Task {
         // SAFETY: It's always safe to call `wake_up_process` on a valid task, even if the task
         // running.
         unsafe { bindings::wake_up_process(self.as_ptr()) };
+    }
+
+    /// Check if the task has the given capability without logging to the audit log.
+    #[inline]
+    pub fn has_capability_noaudit(&self, capability: i32) -> bool {
+        // SAFETY: By the type invariant, we know that `self.0.get()` is valid.
+        unsafe { bindings::has_capability_noaudit(self.0.get(), capability) }
+    }
+
+    /// Returns the current scheduling policy.
+    #[inline]
+    pub fn policy(&self) -> u32 {
+        // SAFETY: The file is valid because the shared reference guarantees a nonzero refcount.
+        //
+        // This uses a volatile read because C code may be modifying this field in parallel using
+        // non-atomic unsynchronized writes. This corresponds to how the C macro READ_ONCE is
+        // implemented.
+        unsafe { core::ptr::addr_of!((*self.0.get()).policy).read_volatile() }
+    }
+
+    /// Returns the current normal priority.
+    #[inline]
+    pub fn normal_prio(&self) -> i32 {
+        // SAFETY: The file is valid because the shared reference guarantees a nonzero refcount.
+        //
+        // This uses a volatile read because C code may be modifying this field in parallel using
+        // non-atomic unsynchronized writes. This corresponds to how the C macro READ_ONCE is
+        // implemented.
+        unsafe { core::ptr::addr_of!((*self.0.get()).normal_prio).read_volatile() }
+    }
+
+    /// Get the rlimit value for RTPRIO.
+    #[inline]
+    pub fn rlimit_rtprio(&self) -> i32 {
+        // SAFETY: By the type invariant, we know that `self.0.get()` is valid, and RLIMIT_RTPRIO
+        // is a valid limit type.
+        unsafe { bindings::task_rlimit(self.0.get(), bindings::RLIMIT_RTPRIO) as i32 }
+    }
+
+    /// Get the rlimit value for NICE, converted to a nice value.
+    #[inline]
+    pub fn rlimit_nice(&self) -> i32 {
+        // SAFETY: By the type invariant, we know that `self.0.get()` is valid, and RLIMIT_NICE
+        // is a valid limit type.
+        let prio = unsafe { bindings::task_rlimit(self.0.get(), bindings::RLIMIT_NICE) };
+
+        // Clamp out-of-range values (e.g. RLIM_INFINITY)
+        let rlimit = usize::min(prio, 40) as i32;
+
+        // Convert rlimit style value [1,40] to nice value [-20, 19].
+        bindings::MAX_NICE as i32 - rlimit + 1
+    }
+
+    /// Set the scheduling properties for this task without checking whether the task is allowed to
+    /// set them.
+    #[inline]
+    pub fn sched_setscheduler_nocheck(
+        &self,
+        policy: i32,
+        sched_priority: i32,
+        reset_on_fork: bool,
+    ) {
+        let params = bindings::sched_param { sched_priority };
+
+        let mut policy = policy;
+        if reset_on_fork {
+            policy |= bindings::SCHED_RESET_ON_FORK as i32;
+        }
+        unsafe { bindings::sched_setscheduler_nocheck(self.0.get(), policy, &params) };
+    }
+
+    /// Set the nice value of this task.
+    #[inline]
+    pub fn set_user_nice(&self, nice: i32) {
+        unsafe { bindings::set_user_nice(self.0.get(), nice as _) };
+    }
+
+    /// Returns whether the task structure's mm field points to an mm struct.
+    #[inline]
+    pub fn has_mm(&self) -> bool {
+        // SAFETY: The caller holds a shared reference to the task struct, so this read is valid.
+        // This uses a volatile read because C code may be modifying this field in parallel using
+        // non-atomic unsynchronized writes. This corresponds to how the C macro READ_ONCE is
+        // implemented.
+        let mm = unsafe { core::ptr::addr_of!((*self.as_ptr()).mm).read_volatile() };
+        !mm.is_null()
     }
 }
 
@@ -345,6 +426,18 @@ impl CurrentTask {
         // `release_task()` call.
         Some(unsafe { PidNamespace::from_ptr(active_ns) })
     }
+
+    /// Returns the group leader of the current task.
+    pub fn group_leader(&self) -> &Task {
+        // SAFETY: The group leader of a task never changes while the task is running, and `self`
+        // is the current task, which is guaranteed running.
+        let ptr = unsafe { (*self.as_ptr()).group_leader };
+
+        // SAFETY: `current->group_leader` stays valid for at least the duration in which `current`
+        // is running, and the signature of this function ensures that the returned `&Task` can
+        // only be used while `current` is still valid, thus still running.
+        unsafe { &*ptr.cast() }
+    }
 }
 
 // SAFETY: The type invariants guarantee that `Task` is always refcounted.
@@ -361,6 +454,15 @@ unsafe impl crate::sync::aref::AlwaysRefCounted for Task {
         unsafe { bindings::put_task_struct(obj.cast().as_ptr()) }
     }
 }
+
+impl PartialEq for Task {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        ptr::eq(self.as_ptr(), other.as_ptr())
+    }
+}
+
+impl Eq for Task {}
 
 impl Kuid {
     /// Get the current euid.

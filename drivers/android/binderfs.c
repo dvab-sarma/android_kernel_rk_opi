@@ -32,6 +32,7 @@
 #include <uapi/linux/android/binder.h>
 #include <uapi/linux/android/binderfs.h>
 
+#include "binder_pick.h"
 #include "binder_internal.h"
 
 #define FIRST_INODE 1
@@ -132,8 +133,8 @@ static int binderfs_binder_device_create(struct inode *ref_inode,
 	mutex_lock(&binderfs_minors_mutex);
 	if (++info->device_count <= info->mount_opts.max)
 		minor = ida_alloc_max(&binderfs_minors,
-				      use_reserve ? BINDERFS_MAX_MINOR :
-						    BINDERFS_MAX_MINOR_CAPPED,
+				      use_reserve ? BINDERFS_MAX_MINOR - 1 :
+						    BINDERFS_MAX_MINOR_CAPPED - 1,
 				      GFP_KERNEL);
 	else
 		minor = -ENOSPC;
@@ -424,8 +425,8 @@ static int binderfs_binder_ctl_create(struct super_block *sb)
 	/* Reserve a new minor number for the new device. */
 	mutex_lock(&binderfs_minors_mutex);
 	minor = ida_alloc_max(&binderfs_minors,
-			      use_reserve ? BINDERFS_MAX_MINOR :
-					    BINDERFS_MAX_MINOR_CAPPED,
+			      use_reserve ? BINDERFS_MAX_MINOR - 1 :
+					    BINDERFS_MAX_MINOR_CAPPED - 1,
 			      GFP_KERNEL);
 	mutex_unlock(&binderfs_minors_mutex);
 	if (minor < 0) {
@@ -758,6 +759,9 @@ static int binderfs_init_fs_context(struct fs_context *fc)
 {
 	struct binderfs_mount_opts *ctx;
 
+	if (on_binderfs_mount())
+		return -EINVAL;
+
 	ctx = kzalloc(sizeof(struct binderfs_mount_opts), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
@@ -824,4 +828,10 @@ int __init init_binderfs(void)
 	}
 
 	return ret;
+}
+
+void unload_binderfs(void)
+{
+	unregister_filesystem(&binder_fs_type);
+	unregister_chrdev_region(binderfs_dev, BINDERFS_MAX_MINOR);
 }

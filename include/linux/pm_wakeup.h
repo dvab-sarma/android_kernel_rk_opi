@@ -94,6 +94,16 @@ static inline void device_set_wakeup_path(struct device *dev)
 	dev->power.wakeup_path = true;
 }
 
+static inline void device_set_out_band_wakeup(struct device *dev)
+{
+	dev->power.out_band_wakeup = true;
+}
+
+static inline bool device_out_band_wakeup(struct device *dev)
+{
+	return dev->power.out_band_wakeup;
+}
+
 /* drivers/base/power/wakeup.c */
 extern struct wakeup_source *wakeup_source_register(struct device *dev,
 						    const char *name);
@@ -161,6 +171,13 @@ static inline bool device_wakeup_path(struct device *dev)
 }
 
 static inline void device_set_wakeup_path(struct device *dev) {}
+
+static inline void device_set_out_band_wakeup(struct device *dev) {}
+
+static inline bool device_out_band_wakeup(struct device *dev)
+{
+	return false;
+}
 
 static inline void __pm_stay_awake(struct wakeup_source *ws) {}
 
@@ -241,5 +258,7 @@ static inline int devm_device_init_wakeup(struct device *dev)
 	device_init_wakeup(dev, true);
 	return devm_add_action_or_reset(dev, device_disable_wakeup, dev);
 }
+
+int wakeup_sources_stats_open(struct inode *inode, struct file *file);
 
 #endif /* _LINUX_PM_WAKEUP_H */

@@ -16,6 +16,7 @@
 #include <linux/fcntl.h>
 #include <linux/filelock.h>
 #include <linux/security.h>
+#include <trace/hooks/fs.h>
 
 /**
  * setattr_should_drop_sgid - determine whether the setgid bit needs to be
@@ -169,7 +170,17 @@ int setattr_prepare(struct mnt_idmap *idmap, struct dentry *dentry,
 	 * ATTR_FORCE.
 	 */
 	if (ia_valid & ATTR_SIZE) {
-		int error = inode_newsize_ok(inode, attr->ia_size);
+		int error;
+
+		/*
+		 * Verity files are immutable, so deny truncates.  This isn't
+		 * covered by the open-time check because sys_truncate() takes a
+		 * path, not an open file.
+		 */
+		if (IS_ENABLED(CONFIG_FS_VERITY) && IS_VERITY(inode))
+			return -EPERM;
+
+		error = inode_newsize_ok(inode, attr->ia_size);
 		if (error)
 			return error;
 	}
@@ -223,7 +234,7 @@ kill_priv:
 
 	return 0;
 }
-EXPORT_SYMBOL(setattr_prepare);
+EXPORT_SYMBOL_NS(setattr_prepare, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  * inode_newsize_ok - may this inode be truncated to a given size
@@ -269,7 +280,7 @@ out_sig:
 out_big:
 	return -EFBIG;
 }
-EXPORT_SYMBOL(inode_newsize_ok);
+EXPORT_SYMBOL_NS(inode_newsize_ok, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  * setattr_copy_mgtime - update timestamps for mgtime inodes
@@ -549,9 +560,10 @@ int notify_change(struct mnt_idmap *idmap, struct dentry *dentry,
 
 	if (!error) {
 		fsnotify_change(dentry, ia_valid);
+		trace_android_rvh_post_setattr(dentry);
 		security_inode_post_setattr(idmap, dentry, ia_valid);
 	}
 
 	return error;
 }
-EXPORT_SYMBOL(notify_change);
+EXPORT_SYMBOL_NS(notify_change, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");

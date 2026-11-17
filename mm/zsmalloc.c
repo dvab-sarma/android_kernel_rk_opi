@@ -38,6 +38,7 @@
 #include <linux/zsmalloc.h>
 #include <linux/fs.h>
 #include <linux/workqueue.h>
+#include <trace/hooks/mm.h>
 #include "zpdesc.h"
 
 #define ZSPAGE_MAGIC	0x58
@@ -407,7 +408,7 @@ static void destroy_cache(struct zs_pool *pool)
 static unsigned long cache_alloc_handle(struct zs_pool *pool, gfp_t gfp)
 {
 	return (unsigned long)kmem_cache_alloc(pool->handle_cachep,
-			gfp & ~(__GFP_HIGHMEM|__GFP_MOVABLE));
+			gfp & ~(__GFP_HIGHMEM|__GFP_MOVABLE|__GFP_CMA));
 }
 
 static void cache_free_handle(struct zs_pool *pool, unsigned long handle)
@@ -418,7 +419,7 @@ static void cache_free_handle(struct zs_pool *pool, unsigned long handle)
 static struct zspage *cache_alloc_zspage(struct zs_pool *pool, gfp_t flags)
 {
 	return kmem_cache_zalloc(pool->zspage_cachep,
-			flags & ~(__GFP_HIGHMEM|__GFP_MOVABLE));
+			flags & ~(__GFP_HIGHMEM|__GFP_MOVABLE|__GFP_CMA));
 }
 
 static void cache_free_zspage(struct zs_pool *pool, struct zspage *zspage)
@@ -1708,6 +1709,7 @@ static int zs_page_migrate(struct page *newpage, struct page *page,
 	 */
 	d_addr = kmap_local_zpdesc(newzpdesc);
 	copy_page(d_addr, s_addr);
+	kmsan_copy_page_meta(zpdesc_page(newzpdesc), zpdesc_page(zpdesc));
 	kunmap_local(d_addr);
 
 	for (addr = s_addr + offset; addr < s_addr + PAGE_SIZE;
@@ -1727,9 +1729,9 @@ static int zs_page_migrate(struct page *newpage, struct page *page,
 	 * Since we complete the data copy and set up new zspage structure,
 	 * it's okay to release migration_lock.
 	 */
-	write_unlock(&pool->lock);
-	spin_unlock(&class->lock);
 	zspage_write_unlock(zspage);
+	spin_unlock(&class->lock);
+	write_unlock(&pool->lock);
 
 	zpdesc_get(newzpdesc);
 	if (zpdesc_zone(newzpdesc) != zpdesc_zone(zpdesc)) {
@@ -1959,6 +1961,11 @@ static unsigned long zs_shrinker_count(struct shrinker *shrinker,
 	struct size_class *class;
 	unsigned long pages_to_free = 0;
 	struct zs_pool *pool = shrinker->private_data;
+	bool bypass = false;
+
+	trace_android_vh_zs_shrinker_bypass(&bypass);
+	if (bypass)
+		return 0;
 
 	for (i = ZS_SIZE_CLASSES - 1; i >= 0; i--) {
 		class = pool->size_class[i];
@@ -1967,6 +1974,7 @@ static unsigned long zs_shrinker_count(struct shrinker *shrinker,
 
 		pages_to_free += zs_can_compact(class);
 	}
+	trace_android_vh_zs_shrinker_adjust(&pages_to_free);
 
 	return pages_to_free;
 }

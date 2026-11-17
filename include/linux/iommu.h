@@ -7,6 +7,7 @@
 #ifndef __LINUX_IOMMU_H
 #define __LINUX_IOMMU_H
 
+#include <linux/android_kabi.h>
 #include <linux/scatterlist.h>
 #include <linux/device.h>
 #include <linux/types.h>
@@ -171,7 +172,6 @@ enum iommu_domain_cookie_type {
 	IOMMU_COOKIE_NONE,
 	IOMMU_COOKIE_DMA_IOVA,
 	IOMMU_COOKIE_DMA_MSI,
-	IOMMU_COOKIE_FAULT_HANDLER,
 	IOMMU_COOKIE_SVA,
 	IOMMU_COOKIE_IOMMUFD,
 };
@@ -229,15 +229,15 @@ struct iommu_domain {
 	unsigned long pgsize_bitmap;	/* Bitmap of page sizes in use */
 	struct iommu_domain_geometry geometry;
 	int (*iopf_handler)(struct iopf_group *group);
+	struct {
+		iommu_fault_handler_t handler;
+		void *handler_token;
+	};
 
 	union { /* cookie */
 		struct iommu_dma_cookie *iova_cookie;
 		struct iommu_dma_msi_cookie *msi_cookie;
 		struct iommufd_hw_pagetable *iommufd_hwpt;
-		struct {
-			iommu_fault_handler_t handler;
-			void *handler_token;
-		};
 		struct {	/* IOMMU_DOMAIN_SVA */
 			struct mm_struct *mm;
 			int users;
@@ -248,6 +248,7 @@ struct iommu_domain {
 			struct list_head next;
 		};
 	};
+	ANDROID_VENDOR_DATA_ARRAY(1, 2);
 };
 
 static inline bool iommu_is_dma_domain(struct iommu_domain *domain)
@@ -361,6 +362,7 @@ struct iommu_iotlb_gather {
 	size_t			pgsize;
 	struct iommu_pages_list	freelist;
 	bool			queued;
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -710,6 +712,11 @@ struct iommu_ops {
 	struct iommu_domain *release_domain;
 	struct iommu_domain *default_domain;
 	u8 user_pasid_table:1;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 /**
@@ -797,6 +804,10 @@ struct iommu_domain_ops {
 	int (*add_deferred_map_sg)(struct iommu_map_cookie_sg *cookie,
 				   phys_addr_t paddr, size_t pgsize, size_t pgcount);
 	size_t (*consume_deferred_map_sg)(struct iommu_map_cookie_sg *cookie);
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 /**
@@ -1155,7 +1166,9 @@ struct iommu_sva {
 
 struct iommu_mm_data {
 	u32			pasid;
+	struct mm_struct	*mm;
 	struct list_head	sva_domains;
+	struct list_head	mm_list_elm;
 };
 
 int iommu_fwspec_init(struct device *dev, struct fwnode_handle *iommu_fwnode);
@@ -1636,6 +1649,7 @@ struct iommu_sva *iommu_sva_bind_device(struct device *dev,
 					struct mm_struct *mm);
 void iommu_sva_unbind_device(struct iommu_sva *handle);
 u32 iommu_sva_get_pasid(struct iommu_sva *handle);
+void iommu_sva_invalidate_kva_range(unsigned long start, unsigned long end);
 #else
 static inline struct iommu_sva *
 iommu_sva_bind_device(struct device *dev, struct mm_struct *mm)
@@ -1660,6 +1674,7 @@ static inline u32 mm_get_enqcmd_pasid(struct mm_struct *mm)
 }
 
 static inline void mm_pasid_drop(struct mm_struct *mm) {}
+static inline void iommu_sva_invalidate_kva_range(unsigned long start, unsigned long end) {}
 #endif /* CONFIG_IOMMU_SVA */
 
 #ifdef CONFIG_IOMMU_IOPF

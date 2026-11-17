@@ -49,6 +49,7 @@
 #include <linux/tracepoint-defs.h>
 #include <linux/unwind_deferred_types.h>
 #include <linux/android_vendor.h>
+#include <linux/android_kabi.h>
 #include <asm/kmap_size.h>
 #ifndef COMPILE_OFFSETS
 #include <generated/rq-offsets.h>
@@ -85,6 +86,7 @@ struct seq_file;
 struct sighand_struct;
 struct signal_struct;
 struct task_delay_info;
+struct task_dma_buf_info;
 struct task_group;
 struct task_struct;
 struct user_event_mm;
@@ -160,7 +162,7 @@ struct user_event_mm;
  */
 #define is_special_task_state(state)					\
 	((state) & (__TASK_STOPPED | __TASK_TRACED | TASK_PARKED |	\
-		    TASK_DEAD | TASK_FROZEN))
+		    TASK_DEAD | TASK_WAKING | TASK_FROZEN))
 
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 # define debug_normal_state_change(state_value)				\
@@ -345,7 +347,8 @@ extern void io_schedule_finish(int token);
 extern long io_schedule_timeout(long timeout);
 extern void io_schedule(void);
 extern int select_fallback_rq(int cpu, struct task_struct *p);
-extern struct task_struct *pick_task(struct rq *rq);
+struct rq_flags;
+extern struct task_struct *pick_task(struct rq *rq, struct rq_flags *rf);
 
 /* wrapper functions to trace from this header file */
 DECLARE_TRACEPOINT(sched_set_state_tp);
@@ -577,6 +580,7 @@ struct sched_entity {
 	u64				deadline;
 	u64				min_vruntime;
 	u64				min_slice;
+	u64				max_slice;
 
 	struct list_head		group_node;
 	unsigned char			on_rq;
@@ -589,15 +593,10 @@ struct sched_entity {
 	u64				sum_exec_runtime;
 	u64				prev_sum_exec_runtime;
 	u64				vruntime;
-	union {
-		/*
-		 * When !@on_rq this field is vlag.
-		 * When cfs_rq->curr == se (which implies @on_rq)
-		 * this field is vprot. See protect_slice().
-		 */
-		s64                     vlag;
-		u64                     vprot;
-	};
+	/* Approximated virtual lag: */
+	s64				vlag;
+	/* 'Protected' deadline, to give out minimum quantums: */
+	u64				vprot;
 	u64				slice;
 
 	u64				nr_migrations;
@@ -638,10 +637,15 @@ struct sched_rt_entity {
 	/* rq "owned" by this entity/group: */
 	struct rt_rq			*my_q;
 #endif
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 } __randomize_layout;
 
-typedef bool (*dl_server_has_tasks_f)(struct sched_dl_entity *);
-typedef struct task_struct *(*dl_server_pick_f)(struct sched_dl_entity *);
+struct rq_flags;
+typedef struct task_struct *(*dl_server_pick_f)(struct sched_dl_entity *, struct rq_flags *rf);
 
 struct sched_dl_entity {
 	struct rb_node			rb_node;
@@ -688,20 +692,22 @@ struct sched_dl_entity {
 	 *
 	 * @dl_server tells if this is a server entity.
 	 *
-	 * @dl_defer tells if this is a deferred or regular server. For
-	 * now only defer server exists.
-	 *
-	 * @dl_defer_armed tells if the deferrable server is waiting
-	 * for the replenishment timer to activate it.
-	 *
 	 * @dl_server_active tells if the dlserver is active(started).
 	 * dlserver is started on first cfs enqueue on an idle runqueue
 	 * and is stopped when a dequeue results in 0 cfs tasks on the
 	 * runqueue. In other words, dlserver is active only when cpu's
 	 * runqueue has atleast one cfs task.
 	 *
+	 * @dl_defer tells if this is a deferred or regular server. For
+	 * now only defer server exists.
+	 *
+	 * @dl_defer_armed tells if the deferrable server is waiting
+	 * for the replenishment timer to activate it.
+	 *
 	 * @dl_defer_running tells if the deferrable server is actually
 	 * running, skipping the defer phase.
+	 *
+	 * @dl_defer_idle tracks idle state
 	 */
 	unsigned int			dl_throttled      : 1;
 	unsigned int			dl_yielded        : 1;
@@ -712,6 +718,7 @@ struct sched_dl_entity {
 	unsigned int			dl_defer	  : 1;
 	unsigned int			dl_defer_armed	  : 1;
 	unsigned int			dl_defer_running  : 1;
+	unsigned int			dl_defer_idle     : 1;
 
 	/*
 	 * Bandwidth enforcement timer. Each -deadline task has its
@@ -733,9 +740,6 @@ struct sched_dl_entity {
 	 * dl_server_update().
 	 *
 	 * @rq the runqueue this server is for
-	 *
-	 * @server_has_tasks() returns true if @server_pick return a
-	 * runnable task.
 	 */
 	struct rq			*rq;
 	dl_server_pick_f		server_pick_task;
@@ -748,6 +752,11 @@ struct sched_dl_entity {
 	 */
 	struct sched_dl_entity *pi_se;
 #endif
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 #ifdef CONFIG_UCLAMP_TASK
@@ -819,6 +828,17 @@ struct kmap_ctrl {
 #endif
 };
 
+enum blocked_on_type {
+	BO_T_NONE,
+	BO_T_MUTEX,
+	BO_T_RWSEM,
+};
+
+struct blocked_on_lock {
+	void *lock;
+	enum blocked_on_type type;
+};
+
 struct task_struct {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	/*
@@ -864,6 +884,7 @@ struct task_struct {
 	int				recent_used_cpu;
 	int				wake_cpu;
 	int				on_rq;
+	int				is_blocked;
 
 	int				prio;
 	int				static_prio;
@@ -1004,6 +1025,9 @@ struct task_struct {
 #ifdef CONFIG_RT_MUTEXES
 	unsigned			sched_rt_mutex:1;
 #endif
+
+	/* Save user-dumpable when mm goes away */
+	unsigned			user_dumpable:1;
 
 	/* Bit to tell TOMOYO we're in execve(): */
 	unsigned			in_execve:1;
@@ -1248,7 +1272,16 @@ struct task_struct {
 	struct rt_mutex_waiter		*pi_blocked_on;
 #endif
 
-	struct mutex			*blocked_on;	/* lock we're blocked on */
+	struct task_struct		*blocked_donor;	/* task that is boosting this task */
+	struct blocked_on_lock		blocked_on;	/* lock we're blocked on */
+	raw_spinlock_t			blocked_lock;
+#ifdef CONFIG_SCHED_PROXY_EXEC
+	struct list_head		blocked_head;  /* tasks blocked on this task */
+	struct list_head		blocked_node;  /* our entry on someone elses blocked_head */
+	/* Node for list of tasks to process blocked_head list for blocked entitiy activations */
+	struct list_head		blocked_activation_node;
+	struct task_struct		*sleeping_owner; /* task our blocked_node is enqueued on */
+#endif
 
 #ifdef CONFIG_DETECT_HUNG_TASK_BLOCKER
 	/*
@@ -1621,6 +1654,10 @@ struct task_struct {
 	unsigned long			prev_lowest_stack;
 #endif
 
+#ifdef CONFIG_RANDOMIZE_KSTACK_OFFSET
+	u32				kstack_offset;
+#endif
+
 #ifdef CONFIG_X86_MCE
 	void __user			*mce_vaddr;
 	__u64				mce_kflags;
@@ -1650,6 +1687,10 @@ struct task_struct {
 	 */
 	struct callback_head		l1d_flush_kill;
 #endif
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 
 #ifdef CONFIG_RV
 	/*
@@ -1666,6 +1707,8 @@ struct task_struct {
 #ifdef CONFIG_UNWIND_USER
 	struct unwind_task_info		unwind_info;
 #endif
+
+	struct task_dma_buf_info *dmabuf_info;
 
 	/* CPU-specific state of this task: */
 	struct thread_struct		thread;
@@ -1806,6 +1849,11 @@ static __always_inline bool is_percpu_thread(void)
 {
 	return (current->flags & PF_NO_SETAFFINITY) &&
 		(current->nr_cpus_allowed  == 1);
+}
+
+static __always_inline bool is_user_task(struct task_struct *task)
+{
+	return task->mm && !(task->flags & (PF_KTHREAD | PF_USER_WORKER));
 }
 
 /* Per-process atomic flags. */
@@ -2157,67 +2205,107 @@ extern int __cond_resched_rwlock_write(rwlock_t *lock);
 })
 
 #ifndef CONFIG_PREEMPT_RT
-static inline struct mutex *__get_task_blocked_on(struct task_struct *p)
-{
-	struct mutex *m = p->blocked_on;
 
-	if (m)
-		lockdep_assert_held_once(&m->wait_lock);
-	return m;
+/*
+ * With proxy exec, if a task has been proxy-migrated, it may be a donor
+ * on a cpu that it can't actually run on. Thus we need a special state
+ * to denote that the task is being woken, but that it needs to be
+ * evaluated for return-migration before it is run. So if the task is
+ * blocked_on PROXY_WAKING, return migrate it before running it.
+ */
+#define PROXY_WAKING ((struct mutex *)(-1L))
+
+static inline void *__get_task_blocked_on(struct task_struct *p)
+{
+	lockdep_assert_held_once(&p->blocked_lock);
+	return p->blocked_on.lock == PROXY_WAKING ? NULL : p->blocked_on.lock;
 }
 
-static inline void __set_task_blocked_on(struct task_struct *p, struct mutex *m)
+/*
+ * These helpers set and clear the task blocked_on pointer, as well
+ * as setting the initial blocked_on_state, or clearing it
+ */
+static inline void __set_task_blocked_on(struct task_struct *p, void *m,
+					 enum blocked_on_type type)
 {
-	struct mutex *blocked_on = READ_ONCE(p->blocked_on);
-
 	WARN_ON_ONCE(!m);
 	/* The task should only be setting itself as blocked */
 	WARN_ON_ONCE(p != current);
-	/* Currently we serialize blocked_on under the mutex::wait_lock */
-	lockdep_assert_held_once(&m->wait_lock);
+	/* Currently we serialize blocked_on under the task::blocked_lock */
+	lockdep_assert_held_once(&p->blocked_lock);
 	/*
 	 * Check ensure we don't overwrite existing mutex value
 	 * with a different mutex. Note, setting it to the same
 	 * lock repeatedly is ok.
 	 */
-	WARN_ON_ONCE(blocked_on && blocked_on != m);
-	WRITE_ONCE(p->blocked_on, m);
+	WARN_ON_ONCE(p->blocked_on.lock && p->blocked_on.lock != m);
+	p->blocked_on.lock = m;
+	p->blocked_on.type = type;
 }
 
-static inline void set_task_blocked_on(struct task_struct *p, struct mutex *m)
+static inline void __clear_task_blocked_on(struct task_struct *p, void *m)
 {
-	guard(raw_spinlock_irqsave)(&m->wait_lock);
-	__set_task_blocked_on(p, m);
+	/* Currently we serialize blocked_on under the task::blocked_lock */
+	lockdep_assert_held_once(&p->blocked_lock);
+	/*
+	 * There may be cases where we re-clear already cleared
+	 * blocked_on relationships, but make sure we are not
+	 * clearing the relationship with a different lock.
+	 */
+	WARN_ON_ONCE(m && p->blocked_on.lock &&
+		     p->blocked_on.lock != m && p->blocked_on.lock != PROXY_WAKING);
+	p->blocked_on.lock = NULL;
+	p->blocked_on.type = BO_T_NONE;
 }
 
-static inline void __clear_task_blocked_on(struct task_struct *p, struct mutex *m)
+static inline void clear_task_blocked_on(struct task_struct *p, void *m)
 {
-	if (m) {
-		struct mutex *blocked_on = READ_ONCE(p->blocked_on);
-
-		/* Currently we serialize blocked_on under the mutex::wait_lock */
-		lockdep_assert_held_once(&m->wait_lock);
-		/*
-		 * There may be cases where we re-clear already cleared
-		 * blocked_on relationships, but make sure we are not
-		 * clearing the relationship with a different lock.
-		 */
-		WARN_ON_ONCE(blocked_on && blocked_on != m);
-	}
-	WRITE_ONCE(p->blocked_on, NULL);
-}
-
-static inline void clear_task_blocked_on(struct task_struct *p, struct mutex *m)
-{
-	guard(raw_spinlock_irqsave)(&m->wait_lock);
+	guard(raw_spinlock_irqsave)(&p->blocked_lock);
 	__clear_task_blocked_on(p, m);
 }
+
+static inline void __set_task_blocked_on_waking(struct task_struct *p, void *m)
+{
+	/* Currently we serialize blocked_on under the task::blocked_lock */
+	lockdep_assert_held_once(&p->blocked_lock);
+
+	if (!sched_proxy_exec()) {
+		__clear_task_blocked_on(p, m);
+		return;
+	}
+
+	/* Don't set PROXY_WAKING if blocked_on was already cleared */
+	if (!p->blocked_on.lock)
+		return;
+	/*
+	 * There may be cases where we set PROXY_WAKING on tasks that were
+	 * already set to waking, but make sure we are not changing
+	 * the relationship with a different lock.
+	 */
+	WARN_ON_ONCE(m && p->blocked_on.lock != m && p->blocked_on.lock != PROXY_WAKING);
+	p->blocked_on.lock = PROXY_WAKING;
+}
+
+static inline void set_task_blocked_on_waking(struct task_struct *p, void *m)
+{
+	guard(raw_spinlock_irqsave)(&p->blocked_lock);
+	__set_task_blocked_on_waking(p, m);
+}
+
 #else
-static inline void __clear_task_blocked_on(struct task_struct *p, struct rt_mutex *m)
+static inline void __clear_task_blocked_on(struct task_struct *p, void *m)
 {
 }
 
-static inline void clear_task_blocked_on(struct task_struct *p, struct rt_mutex *m)
+static inline void clear_task_blocked_on(struct task_struct *p, void *m)
+{
+}
+
+static inline void __set_task_blocked_on_waking(struct task_struct *p, void *m)
+{
+}
+
+static inline void set_task_blocked_on_waking(struct task_struct *p, void *m)
 {
 }
 #endif /* !CONFIG_PREEMPT_RT */

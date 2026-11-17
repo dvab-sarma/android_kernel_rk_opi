@@ -13,6 +13,10 @@
 struct vm_area_struct;
 struct mempolicy;
 
+/* Helper macro to avoid gfp flags if they are the default one */
+#define __default_gfp(a,b,...) b
+#define default_gfp(...) __default_gfp(,##__VA_ARGS__,GFP_KERNEL)
+
 /* Convert GFP flags to their corresponding migrate type */
 #define GFP_MOVABLE_MASK (__GFP_RECLAIMABLE|__GFP_MOVABLE)
 #define GFP_MOVABLE_SHIFT 3
@@ -23,8 +27,6 @@ static inline int gfp_migratetype(const gfp_t gfp_flags)
 	BUILD_BUG_ON((1UL << GFP_MOVABLE_SHIFT) != ___GFP_MOVABLE);
 	BUILD_BUG_ON((___GFP_MOVABLE >> GFP_MOVABLE_SHIFT) != MIGRATE_MOVABLE);
 	BUILD_BUG_ON((___GFP_RECLAIMABLE >> GFP_MOVABLE_SHIFT) != MIGRATE_RECLAIMABLE);
-	BUILD_BUG_ON(((___GFP_MOVABLE | ___GFP_RECLAIMABLE) >>
-		      GFP_MOVABLE_SHIFT) != MIGRATE_HIGHATOMIC);
 
 	if (unlikely(page_group_by_mobility_disabled))
 		return MIGRATE_UNMOVABLE;
@@ -149,7 +151,7 @@ static inline bool gfpflags_allow_spinning(const gfp_t gfp_flags)
 	| 1 << (___GFP_MOVABLE | ___GFP_DMA32 | ___GFP_DMA | ___GFP_HIGHMEM)  \
 )
 
-static inline enum zone_type gfp_zone(gfp_t flags)
+static inline enum zone_type __gfp_zone(gfp_t flags)
 {
 	enum zone_type z;
 	int bit = (__force int) (flags & GFP_ZONEMASK);
@@ -159,6 +161,8 @@ static inline enum zone_type gfp_zone(gfp_t flags)
 	VM_BUG_ON((GFP_ZONE_BAD >> bit) & 1);
 	return z;
 }
+
+enum zone_type gfp_zone(gfp_t flags);
 
 /*
  * There is only one page-allocator function, and two main namespaces to
@@ -387,7 +391,7 @@ extern void free_pages(unsigned long addr, unsigned int order);
 #define free_page(addr) free_pages((addr), 0)
 
 void page_alloc_init_cpuhp(void);
-int decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp);
+bool decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp);
 void drain_zone_pages(struct zone *zone, struct per_cpu_pages *pcp);
 void drain_all_pages(struct zone *zone);
 void drain_local_pages(struct zone *zone);
@@ -422,6 +426,9 @@ static inline bool gfp_compaction_allowed(gfp_t gfp_mask)
 }
 
 extern gfp_t vma_thp_gfp_mask(struct vm_area_struct *vma);
+
+int set_reclaim_params(int wmark_scale_factor, int swappiness);
+void get_reclaim_params(int *wmark_scale_factor, int *swappiness);
 
 #ifdef CONFIG_CONTIG_ALLOC
 

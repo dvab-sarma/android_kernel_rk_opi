@@ -10,6 +10,7 @@
 #include <linux/srcu.h>
 #include <linux/rw_hint.h>
 #include <linux/rwsem.h>
+#include <linux/android_kabi.h>
 
 struct blk_mq_tags;
 struct blk_flush_queue;
@@ -86,7 +87,7 @@ enum rqf_flags {
 
 /* flags that prevent us from merging requests: */
 #define RQF_NOMERGE_FLAGS \
-	(RQF_STARTED | RQF_FLUSH_SEQ | RQF_SPECIAL_PAYLOAD)
+	(RQF_STARTED | RQF_FLUSH_SEQ | RQF_DONTPREP | RQF_SPECIAL_PAYLOAD)
 
 enum mq_rq_state {
 	MQ_RQ_IDLE		= 0,
@@ -206,6 +207,9 @@ struct request {
 	 */
 	rq_end_io_fn *end_io;
 	void *end_io_data;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_OEM_DATA(1);
 };
 
 static inline enum req_op req_op(const struct request *req)
@@ -442,6 +446,8 @@ struct blk_mq_hw_ctx {
 	 * q->unused_hctx_list.
 	 */
 	struct list_head	hctx_list;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -536,6 +542,8 @@ struct blk_mq_tag_set {
 	struct srcu_struct	tags_srcu;
 
 	struct rw_semaphore	update_nr_hwq_lock;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -666,6 +674,8 @@ struct blk_mq_ops {
 	 */
 	void (*show_rq)(struct seq_file *m, struct request *rq);
 #endif
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /* Keep hctx_flag_name[] in sync with the definitions below */
@@ -771,6 +781,7 @@ struct blk_mq_tags {
 	 */
 	spinlock_t lock;
 	struct rcu_head rcu_head;
+	ANDROID_OEM_DATA(1);
 };
 
 static inline struct request *blk_mq_tag_to_rq(struct blk_mq_tags *tags,
@@ -1194,5 +1205,16 @@ static inline int blk_rq_map_sg(struct request *rq, struct scatterlist *sglist)
 	return __blk_rq_map_sg(rq, sglist, &last_sg);
 }
 void blk_dump_rq_flags(struct request *, char *);
+
+static inline bool blk_rq_is_seq_zoned_write(struct request *rq)
+{
+	switch (req_op(rq)) {
+	case REQ_OP_WRITE:
+	case REQ_OP_WRITE_ZEROES:
+		return bdev_zone_is_seq(rq->q->disk->part0, blk_rq_pos(rq));
+	default:
+		return false;
+	}
+}
 
 #endif /* BLK_MQ_H */

@@ -25,6 +25,7 @@
 #include <linux/jhash.h>
 #include <linux/sockptr.h>
 #include <linux/static_key.h>
+#include <linux/android_kabi.h>
 
 #include <net/inet_sock.h>
 #include <net/route.h>
@@ -74,6 +75,13 @@ static inline unsigned int ip_hdrlen(const struct sk_buff *skb)
 	return ip_hdr(skb)->ihl * 4;
 }
 
+static inline int ip_check_csum_start(const struct sk_buff *skb)
+{
+	if (unlikely(skb->csum_start < skb->network_header + ip_hdrlen(skb)))
+		return -EINVAL;
+	return 0;
+}
+
 struct ipcm_cookie {
 	struct sockcm_cookie	sockc;
 	__be32			addr;
@@ -83,6 +91,7 @@ struct ipcm_cookie {
 	__u8			ttl;
 	__s16			tos;
 	__u16			gso_size;
+	ANDROID_KABI_RESERVE(1);
 };
 
 static inline void ipcm_init(struct ipcm_cookie *ipcm)
@@ -101,7 +110,7 @@ static inline void ipcm_init_sk(struct ipcm_cookie *ipcm,
 
 	ipcm->oif = READ_ONCE(inet->sk.sk_bound_dev_if);
 	ipcm->addr = inet->inet_saddr;
-	ipcm->protocol = inet->inet_num;
+	ipcm->protocol = READ_ONCE(inet->inet_num);
 }
 
 #define IPCB(skb) ((struct inet_skb_parm*)((skb)->cb))

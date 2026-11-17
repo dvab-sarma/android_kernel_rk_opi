@@ -3,6 +3,7 @@
 // Copyright (C) 2025 Google LLC.
 
 use kernel::{
+    fmt,
     list::{AtomicTracker, List, ListArc, ListLinks, TryNewListArc},
     prelude::*,
     seq_file::SeqFile,
@@ -14,6 +15,7 @@ use kernel::{
 use crate::{
     defs::*,
     error::BinderError,
+    prio::{self, BinderPriority},
     process::{NodeRefInfo, Process, ProcessInner},
     thread::Thread,
     transaction::Transaction,
@@ -49,9 +51,9 @@ pub(crate) struct CouldNotDeliverCriticalIncrement;
 ///   about to drop the weak reference, then the strong increment could be processed after the
 ///   other thread has already exited, which would be too late.
 ///
-/// Note that trying to create a `ListArc` to the node can succeed even if `has_normal_push` is
+/// Note that trying to create a `ListArc` to the node can succeed even if `has_pushed_node` is
 /// set. This is because another thread might just have popped the node from a todo list, but not
-/// yet called `do_work`. However, if `has_normal_push` is false, then creating a `ListArc` should
+/// yet called `do_work`. However, if `has_pushed_node` is false, then creating a `ListArc` should
 /// always succeed.
 ///
 /// Like the other fields in `NodeInner`, the delivery state is protected by the process lock.
@@ -178,6 +180,18 @@ struct NodeInner {
     refs: List<NodeRefInfo, { NodeRefInfo::LIST_NODE }>,
 }
 
+use kernel::bindings::rb_node_layout;
+use mem::offset_of;
+pub(crate) const NODE_LAYOUT: rb_node_layout = rb_node_layout {
+    arc_offset: Arc::<Node>::DATA_OFFSET + offset_of!(DTRWrap<Node>, wrapped),
+    debug_id: offset_of!(Node, debug_id),
+    ptr: offset_of!(Node, ptr),
+    __kabi_reserved_backport0: 0,
+    __kabi_reserved_backport1: 0,
+    __kabi_reserved_backport2: 0,
+    __kabi_reserved_backport3: 0,
+};
+
 #[pin_data]
 pub(crate) struct Node {
     pub(crate) debug_id: usize,
@@ -200,6 +214,34 @@ kernel::list::impl_list_arc_safe! {
 kernel::list::impl_list_item! {
     impl ListItem<0> for DTRWrap<Transaction> {
         using ListLinks { self.links.inner };
+    }
+}
+
+/// Formats the userspace `ptr` or `cookie` of a [`Node`] in full, or hashed like `%p` if the
+/// flag is set, as done for the `*_hashed` binder_logs files.
+struct MaybeHashed(u64, bool);
+
+impl fmt::Display for MaybeHashed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self(value, hashed) = *self;
+        if hashed {
+            let mut buf = [0u8; 32];
+            let p = (value as usize) as *const kernel::ffi::c_void;
+            // SAFETY: `buf` is valid for writes of `buf.len()` bytes, `kernel::c_str!("%p")` is
+            // NUL-terminated, and `p` matches the `%p` format specifier.
+            let len = unsafe {
+                kernel::bindings::scnprintf(
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    kernel::c_str!("%p").as_char_ptr(),
+                    p,
+                )
+            };
+            let s = core::str::from_utf8(&buf[..len as usize]).map_err(|_| fmt::Error)?;
+            f.write_str(s)
+        } else {
+            write!(f, "{value:016x}")
+        }
     }
 }
 
@@ -249,14 +291,15 @@ impl Node {
         &self,
         m: &SeqFile,
         owner_inner: &mut ProcessInner,
-    ) -> Result<()> {
+        hashed: bool,
+    ) -> Result {
         let inner = self.inner.access_mut(owner_inner);
         seq_print!(
             m,
-            "  node {}: u{:016x} c{:016x} hs {} hw {} cs {} cw {}",
+            "  node {}: u{} c{} hs {} hw {} cs {} cw {}",
             self.debug_id,
-            self.ptr,
-            self.cookie,
+            MaybeHashed(self.ptr, hashed),
+            MaybeHashed(self.cookie, hashed),
             inner.strong.has_count,
             inner.weak.has_count,
             inner.strong.count,
@@ -310,6 +353,22 @@ impl Node {
         }
     }
 
+    pub(crate) fn node_prio(&self) -> prio::BinderPriority {
+        let flags = self.flags;
+        let priority = (flags & FLAT_BINDER_FLAG_PRIORITY_MASK) as prio::Nice;
+        let sched_policy =
+            (flags & FLAT_BINDER_FLAG_SCHED_POLICY_MASK) >> FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT;
+
+        BinderPriority {
+            sched_policy,
+            prio: prio::to_kernel_prio(sched_policy, priority),
+        }
+    }
+
+    pub(crate) fn inherit_rt(&self) -> bool {
+        (self.flags & FLAT_BINDER_FLAG_INHERIT_RT) != 0
+    }
+
     /// An id that is unique across all binder nodes on the system. Used as the key in the
     /// `by_node` map.
     pub(crate) fn global_id(&self) -> usize {
@@ -335,7 +394,7 @@ impl Node {
     ) -> Option<DLArc<Node>> {
         let inner = self.inner.access_mut(owner_inner);
         if inner.active_inc_refs == 0 {
-            pr_err!("inc_ref_done called when no active inc_refs");
+            binder_debug!(UserError, "inc_ref_done called when no active inc_refs");
             return None;
         }
 
@@ -391,7 +450,7 @@ impl Node {
             !is_dead && !state.has_count
         } else {
             if state.count < count {
-                pr_err!("Failure: refcount underflow!");
+                pr_err_ratelimited!("Failure: refcount underflow!\n");
                 return None;
             }
             state.count -= count;
@@ -528,7 +587,7 @@ impl Node {
             inner.oneway_todo.push_back(transaction);
         } else {
             inner.has_oneway_transaction = true;
-            guard.push_work(transaction)?;
+            guard.push_work(&self.owner, transaction)?;
         }
         Ok(())
     }
@@ -560,7 +619,7 @@ impl Node {
         let transaction = inner.oneway_todo.pop_front();
         inner.has_oneway_transaction = transaction.is_some();
         if let Some(transaction) = transaction {
-            match guard.push_work(transaction) {
+            match guard.push_work(&self.owner, transaction) {
                 Ok(()) => {}
                 Err((_err, work)) => {
                     // Process is dead.
@@ -649,46 +708,47 @@ impl Node {
     pub(crate) fn add_freeze_listener(
         &self,
         process: &Arc<Process>,
-        flags: kernel::alloc::Flags,
-    ) -> Result {
-        let mut vec_alloc = KVVec::<Arc<Process>>::new();
-        loop {
-            let mut guard = self.owner.inner.lock();
-            // Do not check for `guard.dead`. The `dead` flag that matters here is the owner of the
-            // listener, no the target.
-            let inner = self.inner.access_mut(&mut guard);
-            let len = inner.freeze_list.len();
-            if len >= inner.freeze_list.capacity() {
-                if len >= vec_alloc.capacity() {
-                    drop(guard);
-                    vec_alloc = KVVec::with_capacity((1 + len).next_power_of_two(), flags)?;
-                    continue;
-                }
-                mem::swap(&mut inner.freeze_list, &mut vec_alloc);
-                for elem in vec_alloc.drain_all() {
-                    inner.freeze_list.push_within_capacity(elem)?;
-                }
+        // If the vector needs to be resized, it's done via this argument.
+        vec_alloc: &mut KVVec<Arc<Process>>,
+    ) -> Result<Result<(), usize>> {
+        let mut guard = self.owner.inner.lock();
+        // Do not check for `guard.dead`. The `dead` flag that matters here is the owner of the
+        // listener, not the target.
+        let inner = self.inner.access_mut(&mut guard);
+        let len = inner.freeze_list.len();
+        if len == inner.freeze_list.capacity() {
+            if len >= vec_alloc.capacity() {
+                // Request the caller to reallocate.
+                return Ok(Err((1 + len).next_power_of_two()));
             }
-            inner.freeze_list.push_within_capacity(process.clone())?;
-            return Ok(());
+            mem::swap(&mut inner.freeze_list, vec_alloc);
+            for elem in vec_alloc.drain_all() {
+                inner.freeze_list.push_within_capacity(elem)?;
+            }
         }
+        inner.freeze_list.push_within_capacity(process.clone())?;
+        Ok(Ok(()))
     }
 
-    pub(crate) fn remove_freeze_listener(&self, p: &Arc<Process>) {
-        let _unused_capacity;
+    pub(crate) fn remove_freeze_listener(&self, p: &Process) -> KVVec<Arc<Process>> {
         let mut guard = self.owner.inner.lock();
         let inner = self.inner.access_mut(&mut guard);
         let len = inner.freeze_list.len();
-        inner.freeze_list.retain(|proc| !Arc::ptr_eq(proc, p));
+        inner
+            .freeze_list
+            .retain(|proc| !core::ptr::eq::<Process>(&**proc, p));
         if len == inner.freeze_list.len() {
-            pr_warn!(
+            pr_warn_ratelimited!(
                 "Could not remove freeze listener for {}\n",
                 p.pid_in_current_ns()
             );
         }
+        // If the vector is empty it needs to be freed. However, we can't free it here because that
+        // might sleep, so return it to the caller.
         if inner.freeze_list.is_empty() {
-            _unused_capacity = mem::take(&mut inner.freeze_list);
+            return mem::take(&mut inner.freeze_list);
         }
+        KVVec::new()
     }
 
     pub(crate) fn freeze_list<'a>(&'a self, guard: &'a ProcessInner) -> &'a [Arc<Process>] {
@@ -723,21 +783,35 @@ impl DeliverToRead for Node {
         self.do_work_locked(writer, owner_inner)
     }
 
-    fn cancel(self: DArc<Self>) {}
+    fn cancel(self: DArc<Self>) {
+        let _drop_outside_lock;
+        let mut owner_inner = self.owner.inner.lock();
+
+        // We only do something on BINDER_THREAD_EXIT, not process exit.
+        if owner_inner.is_dead {
+            return;
+        }
+
+        // If BINDER_THREAD_EXIT is invoked on a thread with a pending node refcount update, we
+        // should move ourselves to ensure the refcount update is still delivered.
+        if let Some(node) = ListArc::try_from_arc_borrow(self.as_arc_borrow()) {
+            _drop_outside_lock = owner_inner.push_work(&self.owner, node);
+        }
+    }
 
     fn should_sync_wakeup(&self) -> bool {
         false
     }
 
     #[inline(never)]
-    fn debug_print(&self, m: &SeqFile, prefix: &str, _tprefix: &str) -> Result<()> {
+    fn debug_print(&self, m: &SeqFile, prefix: &str, _tprefix: &str, hashed: bool) -> Result {
         seq_print!(
             m,
-            "{}node work {}: u{:016x} c{:016x}\n",
+            "{}node work {}: u{} c{}\n",
             prefix,
             self.debug_id,
-            self.ptr,
-            self.cookie,
+            MaybeHashed(self.ptr, hashed),
+            MaybeHashed(self.cookie, hashed),
         );
         Ok(())
     }
@@ -810,6 +884,7 @@ impl NodeRef {
 
     pub(crate) fn clone(&self, strong: bool) -> Result<NodeRef> {
         if strong && self.strong_count == 0 {
+            binder_debug!(UserError, "tried to use weak ref as strong ref");
             return Err(EINVAL);
         }
         Ok(self
@@ -850,9 +925,10 @@ impl NodeRef {
             *count += 1;
         } else {
             if *count == 0 {
-                pr_warn!(
-                    "pid {} performed invalid decrement on ref\n",
-                    kernel::current!().pid()
+                binder_debug!(
+                    UserError,
+                    "performed invalid {} decrement on ref",
+                    if strong { "strong" } else { "weak" }
                 );
                 return false;
             }
@@ -1094,6 +1170,11 @@ impl DeliverToRead for NodeDeath {
             // We're still holding the inner lock, so it cannot be aborted while we insert it into
             // the delivered list.
             process_inner.death_delivered(self.clone());
+            binder_debug!(
+                DeathNotification,
+                "sending death notification, cookie {:016x}",
+                cookie
+            );
             BR_DEAD_BINDER
         };
 
@@ -1104,14 +1185,21 @@ impl DeliverToRead for NodeDeath {
         Ok(cmd != BR_DEAD_BINDER)
     }
 
-    fn cancel(self: DArc<Self>) {}
+    fn cancel(self: DArc<Self>) {
+        binder_debug!(
+            pid = self.process.task.pid(),
+            DeadTransaction,
+            "undelivered death notification, {:016x}",
+            self.cookie
+        );
+    }
 
     fn should_sync_wakeup(&self) -> bool {
         false
     }
 
     #[inline(never)]
-    fn debug_print(&self, m: &SeqFile, prefix: &str, _tprefix: &str) -> Result<()> {
+    fn debug_print(&self, m: &SeqFile, prefix: &str, _tprefix: &str, _hashed: bool) -> Result {
         let inner = self.inner.lock();
 
         let dead_binder = inner.dead && !inner.notification_done;

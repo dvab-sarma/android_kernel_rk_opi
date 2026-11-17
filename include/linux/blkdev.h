@@ -26,6 +26,8 @@
 #include <linux/xarray.h>
 #include <linux/file.h>
 #include <linux/lockdep.h>
+#include <linux/android_vendor.h>
+#include <linux/android_kabi.h>
 
 struct module;
 struct request_queue;
@@ -121,6 +123,9 @@ struct blk_integrity {
 	unsigned char				interval_exp;
 	unsigned char				tag_size;
 	unsigned char				pi_tuple_size;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 typedef unsigned int __bitwise blk_mode_t;
@@ -220,6 +225,8 @@ struct gendisk {
 	struct blk_independent_access_ranges *ia_ranges;
 
 	struct mutex rqos_state_mutex;	/* rqos state change mutex */
+
+	ANDROID_OEM_DATA(1);
 };
 
 /**
@@ -347,12 +354,21 @@ typedef unsigned int __bitwise blk_features_t;
 	((__force blk_features_t)(1u << 16))
 
 /*
+ * The request order is preserved per hardware queue by the block driver and by
+ * the block device. Set by the block driver.
+ */
+#define BLK_FEAT_ORDERED_HWQ		((__force blk_features_t)(1u << 30))
+
+/* Whether restoring the zoned write order is supported. */
+#define BLK_FEAT_ZWOR			((__force blk_features_t)(1u << 31))
+
+/*
  * Flags automatically inherited when stacking limits.
  */
 #define BLK_FEAT_INHERIT_MASK \
 	(BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA | BLK_FEAT_ROTATIONAL | \
 	 BLK_FEAT_STABLE_WRITES | BLK_FEAT_ZONED | \
-	 BLK_FEAT_RAID_PARTIAL_STRIPES_EXPENSIVE)
+	 BLK_FEAT_RAID_PARTIAL_STRIPES_EXPENSIVE | BLK_FEAT_ORDERED_HWQ)
 
 /* internal flags in queue_limits.flags */
 typedef unsigned int __bitwise blk_flags_t;
@@ -427,6 +443,8 @@ struct queue_limits {
 	unsigned int		dma_pad_mask;
 
 	struct blk_integrity	integrity;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 typedef int (*report_zones_cb)(struct blk_zone *zone, unsigned int idx,
@@ -485,7 +503,7 @@ struct request_queue {
 	 */
 	unsigned long		queue_flags;
 
-	unsigned int		rq_timeout;
+	unsigned int __data_racy rq_timeout;
 
 	unsigned int		queue_depth;
 
@@ -637,6 +655,12 @@ struct request_queue {
 	 * Serializes all debugfs metadata operations using the above dentries.
 	 */
 	struct mutex		debugfs_mutex;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+	ANDROID_OEM_DATA(1);
 };
 
 /* Keep blk_queue_flag_name[] in sync with the definitions below */
@@ -732,9 +756,13 @@ static inline bool blk_queue_is_zoned(struct request_queue *q)
 
 static inline unsigned int disk_zone_no(struct gendisk *disk, sector_t sector)
 {
+	const sector_t zone_sectors = disk->queue->limits.chunk_sectors;
+
 	if (!blk_queue_is_zoned(disk->queue))
 		return 0;
-	return sector >> ilog2(disk->queue->limits.chunk_sectors);
+	if (is_power_of_2(zone_sectors))
+		return sector >> ilog2(zone_sectors);
+	return div64_u64(sector, zone_sectors);
 }
 
 static inline unsigned int bdev_max_open_zones(struct block_device *bdev)
@@ -849,6 +877,24 @@ static inline unsigned int disk_nr_zones(struct gendisk *disk)
 	return disk->nr_zones;
 }
 
+/*
+ * blk_pipeline_zwr() - Whether or not sequential zoned writes will be
+ *	pipelined per zone.
+ * @q: request queue pointer.
+ *
+ * Return: %true if and only if zoned writes will be pipelined per zone.
+ */
+static inline bool blk_pipeline_zwr(struct request_queue *q)
+{
+	return q->limits.features & BLK_FEAT_ORDERED_HWQ;
+}
+
+/* Whether or not to use the zone write order restore feature. */
+static inline bool blk_use_zwor(struct request_queue *q)
+{
+	return q->limits.features & BLK_FEAT_ZWOR;
+}
+
 /**
  * bio_needs_zone_write_plugging - Check if a BIO needs to be handled with zone
  *				   write plugging
@@ -897,7 +943,7 @@ static inline bool bio_needs_zone_write_plugging(struct bio *bio)
 	}
 }
 
-bool blk_zone_plug_bio(struct bio *bio, unsigned int nr_segs);
+bool blk_zone_plug_bio(struct bio *bio, unsigned int nr_segs, int rq_cpu);
 
 /**
  * disk_zone_capacity - returns the zone capacity of zone containing @sector
@@ -927,12 +973,23 @@ static inline unsigned int disk_nr_zones(struct gendisk *disk)
 	return 0;
 }
 
+static inline bool blk_pipeline_zwr(struct request_queue *q)
+{
+	return false;
+}
+
+static inline bool blk_use_zwor(struct request_queue *q)
+{
+	return false;
+}
+
 static inline bool bio_needs_zone_write_plugging(struct bio *bio)
 {
 	return false;
 }
 
-static inline bool blk_zone_plug_bio(struct bio *bio, unsigned int nr_segs)
+static inline bool blk_zone_plug_bio(struct bio *bio, unsigned int nr_segs,
+				     int rq_cpu)
 {
 	return false;
 }
@@ -1187,16 +1244,12 @@ static inline void blk_flush_plug(struct blk_plug *plug, bool async)
 		__blk_flush_plug(plug, async);
 }
 
-/*
- * tsk == current here
- */
-static inline void blk_plug_invalidate_ts(struct task_struct *tsk)
+static __always_inline void blk_plug_invalidate_ts(void)
 {
-	struct blk_plug *plug = tsk->plug;
-
-	if (plug)
-		plug->cur_ktime = 0;
-	current->flags &= ~PF_BLOCK_TS;
+	if (unlikely(current->flags & PF_BLOCK_TS)) {
+		current->plug->cur_ktime = 0;
+		current->flags &= ~PF_BLOCK_TS;
+	}
 }
 
 int blkdev_issue_flush(struct block_device *bdev);
@@ -1222,7 +1275,7 @@ static inline void blk_flush_plug(struct blk_plug *plug, bool async)
 {
 }
 
-static inline void blk_plug_invalidate_ts(struct task_struct *tsk)
+static inline void blk_plug_invalidate_ts(void)
 {
 }
 
@@ -1507,7 +1560,17 @@ static inline sector_t bdev_zone_sectors(struct block_device *bdev)
 static inline sector_t bdev_offset_from_zone_start(struct block_device *bdev,
 						   sector_t sector)
 {
-	return sector & (bdev_zone_sectors(bdev) - 1);
+	sector_t zone_sectors = bdev_zone_sectors(bdev);
+	u64 remainder = 0;
+
+	if (!bdev_is_zoned(bdev))
+		return 0;
+
+	if (is_power_of_2(zone_sectors))
+		return sector & (zone_sectors - 1);
+
+	div64_u64_rem(sector, zone_sectors, &remainder);
+	return remainder;
 }
 
 static inline sector_t bio_offset_from_zone_start(struct bio *bio)
@@ -1676,6 +1739,9 @@ struct block_device_operations {
 	 * driver.
 	 */
 	int (*alternative_gpt_sector)(struct gendisk *disk, sector_t *sector);
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 #ifdef CONFIG_COMPAT

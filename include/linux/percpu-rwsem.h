@@ -19,12 +19,22 @@ struct percpu_rw_semaphore {
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lockdep_map	dep_map;
 #endif
+	ANDROID_OEM_DATA(1);
 };
+
+void _trace_android_vh_pcpu_rwsem_lock_acquired(struct percpu_rw_semaphore *sem);
+void _trace_android_vh_pcpu_rwsem_lock_released(struct percpu_rw_semaphore *sem);
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 #define __PERCPU_RWSEM_DEP_MAP_INIT(lockname)	.dep_map = { .name = #lockname },
 #else
 #define __PERCPU_RWSEM_DEP_MAP_INIT(lockname)
+#endif
+
+#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA
+#define __PERCPU_RWSEM_OEM_DATA_INIT(lockname)	.android_oem_data1 = 0,
+#else
+#define __PERCPU_RWSEM_OEM_DATA_INIT(lockname)
 #endif
 
 #define __DEFINE_PERCPU_RWSEM(name, is_static)				\
@@ -36,6 +46,7 @@ is_static struct percpu_rw_semaphore name = {				\
 	.waiters = __WAIT_QUEUE_HEAD_INITIALIZER(name.waiters),		\
 	.block = ATOMIC_INIT(0),					\
 	__PERCPU_RWSEM_DEP_MAP_INIT(name)				\
+	__PERCPU_RWSEM_OEM_DATA_INIT(name)				\
 }
 
 #define DEFINE_PERCPU_RWSEM(name)		\
@@ -69,6 +80,7 @@ static inline void percpu_down_read_internal(struct percpu_rw_semaphore *sem,
 	 * The preempt_enable() prevents the compiler from
 	 * bleeding the critical section out.
 	 */
+	_trace_android_vh_pcpu_rwsem_lock_acquired(sem);
 	preempt_enable();
 }
 
@@ -101,8 +113,10 @@ static inline bool percpu_down_read_trylock(struct percpu_rw_semaphore *sem)
 	 * bleeding the critical section out.
 	 */
 
-	if (ret)
+	if (ret) {
+		_trace_android_vh_pcpu_rwsem_lock_acquired(sem);
 		rwsem_acquire_read(&sem->dep_map, 0, 1, _RET_IP_);
+	}
 
 	return ret;
 }
@@ -131,6 +145,7 @@ static inline void percpu_up_read(struct percpu_rw_semaphore *sem)
 		this_cpu_dec(*sem->read_count);
 		rcuwait_wake_up(&sem->writer);
 	}
+	_trace_android_vh_pcpu_rwsem_lock_released(sem);
 	preempt_enable();
 }
 

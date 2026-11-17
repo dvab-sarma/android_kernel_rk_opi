@@ -180,9 +180,30 @@ static inline void psi_dequeue(struct task_struct *p, int flags)
 	 * avoid walking all ancestors twice, psi_task_switch() handles
 	 * TSK_RUNNING and TSK_IOWAIT for us when it moves TSK_ONCPU.
 	 * Do nothing here.
+	 *
+	 * In the SCHED_PROXY_EXECUTION case we may do sleeping
+	 * dequeues that are not followed by a task switch. If TSK_ONCPU
+	 * is not set (meaning we already switched away while the task
+	 * stayed on the rq as a blocked donor), handle the sleeping
+	 * state transition here so sleep-persistent states (TSK_MEMSTALL,
+	 * TSK_IOWAIT) are preserved.
 	 */
-	if (flags & DEQUEUE_SLEEP)
+	if (flags & DEQUEUE_SLEEP) {
+		int clear = TSK_RUNNING, set = 0;
+
+		if (p->psi_flags & TSK_ONCPU)
+			return;
+		if (p->se.sched_delayed)
+			return;
+
+		if (p->in_memstall)
+			clear |= TSK_MEMSTALL_RUNNING;
+		if (p->in_iowait)
+			set |= TSK_IOWAIT;
+
+		psi_task_change(p, clear, set);
 		return;
+	}
 
 	/*
 	 * When migrating a task to another CPU, clear all psi

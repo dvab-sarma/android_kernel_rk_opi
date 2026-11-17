@@ -13,6 +13,8 @@
 
 #include <linux/bitops.h>
 #include <linux/types.h>
+#include <linux/android_vendor.h>
+#include <linux/android_kabi.h>
 #include <uapi/scsi/scsi_bsg_ufs.h>
 #include <linux/time64.h>
 
@@ -190,7 +192,11 @@ enum attr_idn {
 	QUERY_ATTR_IDN_WB_BUF_RESIZE_HINT	= 0x3C,
 	QUERY_ATTR_IDN_WB_BUF_RESIZE_EN		= 0x3D,
 	QUERY_ATTR_IDN_WB_BUF_RESIZE_STATUS	= 0x3E,
+	QUERY_ATTR_IDN_TX_EQ_GN_SETTINGS        = 0x47,
+	QUERY_ATTR_IDN_TX_EQ_GN_SETTINGS_EXT    = 0x48,
 };
+ANDROID_KABI_ENUMERATOR_IGNORE(attr_idn, QUERY_ATTR_IDN_TX_EQ_GN_SETTINGS);
+ANDROID_KABI_ENUMERATOR_IGNORE(attr_idn, QUERY_ATTR_IDN_TX_EQ_GN_SETTINGS_EXT);
 
 /* Descriptor idn for Query requests */
 enum desc_idn {
@@ -407,6 +413,7 @@ enum {
 	UFS_DEV_WRITE_BOOSTER_SUP	= BIT(8),
 	UFS_DEV_LVL_EXCEPTION_SUP       = BIT(12),
 	UFS_DEV_HID_SUPPORT		= BIT(13),
+	UFS_DEV_ZWOR_SUPPORT		= BIT(20),
 };
 #define UFS_DEV_HPB_SUPPORT_VERSION		0x310
 
@@ -649,8 +656,12 @@ struct ufs_dev_info {
 	u32 rtc_update_period;
 
 	u8 rtt_cap; /* bDeviceRTTCap */
-
 	bool hid_sup;
+	bool zwor_sup;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_OEM_DATA(1);
 };
 
 #endif /* End of Header */

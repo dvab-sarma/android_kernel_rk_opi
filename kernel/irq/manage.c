@@ -22,6 +22,8 @@
 #include <uapi/linux/sched/types.h>
 #include <linux/task_work.h>
 
+#include <trace/hooks/dtask.h>
+
 #include "internals.h"
 
 #if defined(CONFIG_IRQ_FORCED_THREADING) && !defined(CONFIG_PREEMPT_RT)
@@ -33,6 +35,16 @@ static int __init setup_forced_irqthreads(char *arg)
 	return 0;
 }
 early_param("threadirqs", setup_forced_irqthreads);
+#endif
+
+#ifdef CONFIG_SMP
+static inline void synchronize_irqwork(struct irq_desc *desc)
+{
+	/* Synchronize pending or on the fly redirect work */
+	irq_work_sync(&desc->redirect.work);
+}
+#else
+static inline void synchronize_irqwork(struct irq_desc *desc) { }
 #endif
 
 static int __irq_get_irqchip_state(struct irq_data *d, enum irqchip_irq_state which, bool *state);
@@ -107,12 +119,16 @@ EXPORT_SYMBOL(synchronize_hardirq);
 
 static void __synchronize_irq(struct irq_desc *desc)
 {
+	synchronize_irqwork(desc);
 	__synchronize_hardirq(desc, true);
+
 	/*
 	 * We made sure that no hardirq handler is running. Now verify that no
 	 * threaded handlers are active.
 	 */
+	trace_android_vh_sync_irq_wait_start(desc);
 	wait_event(desc->wait_for_threads, !atomic_read(&desc->threads_active));
+	trace_android_vh_sync_irq_wait_finish(desc);
 }
 
 /**
@@ -217,8 +233,7 @@ static inline void irq_validate_effective_affinity(struct irq_data *data) { }
 
 static DEFINE_PER_CPU(struct cpumask, __tmp_mask);
 
-int irq_do_set_affinity(struct irq_data *data, const struct cpumask *mask,
-			bool force)
+int irq_do_set_affinity(struct irq_data *data, const struct cpumask *mask, bool force)
 {
 	struct cpumask *tmp_mask = this_cpu_ptr(&__tmp_mask);
 	struct irq_desc *desc = irq_data_to_desc(data);
@@ -348,6 +363,21 @@ static bool irq_set_affinity_deactivated(struct irq_data *data,
 	return true;
 }
 
+/**
+ * irq_affinity_schedule_notify_work - Schedule work to notify about affinity change
+ * @desc:  Interrupt descriptor whose affinity changed
+ */
+void irq_affinity_schedule_notify_work(struct irq_desc *desc)
+{
+	lockdep_assert_held(&desc->lock);
+
+	kref_get(&desc->affinity_notify->kref);
+	if (!schedule_work(&desc->affinity_notify->work)) {
+		/* Work was already scheduled, drop our extra ref */
+		kref_put(&desc->affinity_notify->kref, desc->affinity_notify->release);
+	}
+}
+
 int irq_set_affinity_locked(struct irq_data *data, const struct cpumask *mask,
 			    bool force)
 {
@@ -368,14 +398,9 @@ int irq_set_affinity_locked(struct irq_data *data, const struct cpumask *mask,
 		irq_copy_pending(desc, mask);
 	}
 
-	if (desc->affinity_notify) {
-		kref_get(&desc->affinity_notify->kref);
-		if (!schedule_work(&desc->affinity_notify->work)) {
-			/* Work was already scheduled, drop our extra ref */
-			kref_put(&desc->affinity_notify->kref,
-				 desc->affinity_notify->release);
-		}
-	}
+	if (desc->affinity_notify)
+		irq_affinity_schedule_notify_work(desc);
+
 	irqd_set(data, IRQD_AFFINITY_SET);
 
 	return ret;

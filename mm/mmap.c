@@ -48,6 +48,7 @@
 #include <linux/sched/mm.h>
 #include <linux/ksm.h>
 #include <linux/memfd.h>
+#include <linux/page_size_compat.h>
 
 #include <linux/uaccess.h>
 #include <asm/cacheflush.h>
@@ -57,20 +58,25 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/mmap.h>
 
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/mm.h>
+
 #include "internal.h"
+
+EXPORT_TRACEPOINT_SYMBOL_GPL(vm_unmapped_area);
 
 #ifndef arch_mmap_check
 #define arch_mmap_check(addr, len, flags)	(0)
 #endif
 
 #ifdef CONFIG_HAVE_ARCH_MMAP_RND_BITS
-const int mmap_rnd_bits_min = CONFIG_ARCH_MMAP_RND_BITS_MIN;
+int mmap_rnd_bits_min __ro_after_init = CONFIG_ARCH_MMAP_RND_BITS_MIN;
 int mmap_rnd_bits_max __ro_after_init = CONFIG_ARCH_MMAP_RND_BITS_MAX;
 int mmap_rnd_bits __read_mostly = CONFIG_ARCH_MMAP_RND_BITS;
 #endif
 #ifdef CONFIG_HAVE_ARCH_MMAP_RND_COMPAT_BITS
-const int mmap_rnd_compat_bits_min = CONFIG_ARCH_MMAP_RND_COMPAT_BITS_MIN;
-const int mmap_rnd_compat_bits_max = CONFIG_ARCH_MMAP_RND_COMPAT_BITS_MAX;
+int mmap_rnd_compat_bits_min __ro_after_init = CONFIG_ARCH_MMAP_RND_COMPAT_BITS_MIN;
+int mmap_rnd_compat_bits_max __ro_after_init = CONFIG_ARCH_MMAP_RND_COMPAT_BITS_MAX;
 int mmap_rnd_compat_bits __read_mostly = CONFIG_ARCH_MMAP_RND_COMPAT_BITS;
 #endif
 
@@ -150,8 +156,8 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 			      mm->end_data, mm->start_data))
 		goto out;
 
-	newbrk = PAGE_ALIGN(brk);
-	oldbrk = PAGE_ALIGN(mm->brk);
+	newbrk = __PAGE_ALIGN(brk);
+	oldbrk = __PAGE_ALIGN(mm->brk);
 	if (oldbrk == newbrk) {
 		mm->brk = brk;
 		goto success;
@@ -185,8 +191,8 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	 * expansion area
 	 */
 	vma_iter_init(&vmi, mm, oldbrk);
-	next = vma_find(&vmi, newbrk + PAGE_SIZE + stack_guard_gap);
-	if (next && newbrk + PAGE_SIZE > vm_start_gap(next))
+	next = vma_find(&vmi, newbrk + __PAGE_SIZE + stack_guard_gap);
+	if (next && newbrk + __PAGE_SIZE > vm_start_gap(next))
 		goto out;
 
 	brkvma = vma_prev_limit(&vmi, mm->start_brk);
@@ -218,10 +224,10 @@ out:
  */
 static inline unsigned long round_hint_to_min(unsigned long hint)
 {
-	hint &= PAGE_MASK;
+	hint &= __PAGE_MASK;
 	if (((void *)hint != NULL) &&
 	    (hint < mmap_min_addr))
-		return PAGE_ALIGN(mmap_min_addr);
+		return __PAGE_ALIGN(mmap_min_addr);
 	return hint;
 }
 
@@ -365,7 +371,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		addr = round_hint_to_min(addr);
 
 	/* Careful about overflows.. */
-	len = PAGE_ALIGN(len);
+	len = __PAGE_ALIGN(len);
 	if (!len)
 		return -ENOMEM;
 
@@ -374,6 +380,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		return -EOVERFLOW;
 
 	/* Too many mappings? */
+	trace_android_vh_do_mmap_map_count(file, addr, len, prot, flags);
 	if (mm->map_count > sysctl_max_map_count)
 		return -ENOMEM;
 
@@ -502,7 +509,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			break;
 		case MAP_DROPPABLE:
 			if (VM_DROPPABLE == VM_NONE)
-				return -ENOTSUPP;
+				return -EOPNOTSUPP;
 			/*
 			 * A locked or stack area makes no sense to be droppable.
 			 *
@@ -554,6 +561,8 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		if (file && is_file_hugepages(file))
 			vm_flags |= VM_NORESERVE;
 	}
+
+	pgoff = __bpf_pgoff_fixup(file, pgoff);
 
 	addr = mmap_region(file, addr, len, vm_flags, pgoff, uf);
 	if (!IS_ERR_VALUE(addr) &&
@@ -1079,6 +1088,12 @@ EXPORT_SYMBOL(vm_munmap);
 SYSCALL_DEFINE2(munmap, unsigned long, addr, size_t, len)
 {
 	addr = untagged_addr(addr);
+
+	if (!__PAGE_ALIGNED(addr))
+		return -EINVAL;
+
+	len = __PAGE_ALIGN(len);
+
 	profile_munmap(addr);
 	return __vm_munmap(addr, len, true);
 }
@@ -1123,7 +1138,7 @@ SYSCALL_DEFINE5(remap_file_pages, unsigned long, start, unsigned long, size,
 	 */
 	vma = vma_lookup(mm, start);
 
-	if (!vma || !(vma->vm_flags & VM_SHARED)) {
+	if (!vma || !(vma->vm_flags & VM_SHARED) || vma->vm_flags & VM_NO_REMAP_FILE_PAGES) {
 		mmap_read_unlock(mm);
 		return -EINVAL;
 	}
@@ -1278,9 +1293,11 @@ void exit_mmap(struct mm_struct *mm)
 
 	flush_cache_mm(mm);
 	tlb_gather_mmu_fullmm(&tlb, mm);
+	trace_android_vh_swapmem_gather_init(mm);
 	/* update_hiwater_rss(mm) here? but nobody should be looking */
 	/* Use ULONG_MAX here to ensure all VMAs in the mm are unmapped */
 	unmap_vmas(&tlb, &vmi.mas, vma, 0, ULONG_MAX, ULONG_MAX, false);
+	trace_android_vh_swapmem_gather_finish(mm);
 	mmap_read_unlock(mm);
 
 	/*

@@ -144,6 +144,7 @@ enum lockdown_reason {
 	LOCKDOWN_BPF_WRITE_USER,
 	LOCKDOWN_DBG_WRITE_KERNEL,
 	LOCKDOWN_RTAS_ERROR_INJECTION,
+	LOCKDOWN_XEN_USER_ACTIONS,
 	LOCKDOWN_INTEGRITY_MAX,
 	LOCKDOWN_KCORE,
 	LOCKDOWN_KPROBES,
@@ -2378,6 +2379,7 @@ static inline int security_perf_event_write(struct perf_event *event)
 extern int security_uring_override_creds(const struct cred *new);
 extern int security_uring_sqpoll(void);
 extern int security_uring_cmd(struct io_uring_cmd *ioucmd);
+extern int security_uring_allowed(void);
 #else
 static inline int security_uring_override_creds(const struct cred *new)
 {
@@ -2388,6 +2390,10 @@ static inline int security_uring_sqpoll(void)
 	return 0;
 }
 static inline int security_uring_cmd(struct io_uring_cmd *ioucmd)
+{
+	return 0;
+}
+static inline int security_uring_allowed(void)
 {
 	return 0;
 }

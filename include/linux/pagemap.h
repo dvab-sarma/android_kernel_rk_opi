@@ -15,6 +15,7 @@
 #include <linux/bitops.h>
 #include <linux/hardirq.h> /* for in_interrupt() */
 #include <linux/hugetlb_inline.h>
+#include <linux/android_kabi.h>
 
 struct folio_batch;
 
@@ -145,6 +146,8 @@ static inline bool mapping_empty(const struct address_space *mapping)
 	return xa_empty(&mapping->i_pages);
 }
 
+extern void _trace_android_rvh_mapping_shrinkable(bool *shrinkable);
+
 /*
  * mapping_shrinkable - test if page cache state allows inode reclaim
  * @mapping: the page cache mapping
@@ -169,7 +172,11 @@ static inline bool mapping_empty(const struct address_space *mapping)
 static inline bool mapping_shrinkable(const struct address_space *mapping)
 {
 	void *head;
+	bool shrinkable = false;
 
+	_trace_android_rvh_mapping_shrinkable(&shrinkable);
+	if (shrinkable)
+		return true;
 	/*
 	 * On highmem systems, there could be lowmem pressure from the
 	 * inodes before there is highmem pressure from the page
@@ -656,8 +663,16 @@ static inline void *detach_page_private(struct page *page)
 #ifdef CONFIG_NUMA
 struct folio *filemap_alloc_folio_noprof(gfp_t gfp, unsigned int order);
 #else
+extern void _trace_android_vh_filemap_alloc_folio(gfp_t gfp, unsigned int order,
+					   bool *alloc_fail);
+
 static inline struct folio *filemap_alloc_folio_noprof(gfp_t gfp, unsigned int order)
 {
+	bool alloc_fail = false;
+	_trace_android_vh_filemap_alloc_folio(gfp, order, &alloc_fail);
+	if (alloc_fail)
+		return NULL;
+
 	return folio_alloc_noprof(gfp, order);
 }
 #endif
@@ -670,10 +685,12 @@ static inline struct page *__page_cache_alloc(gfp_t gfp)
 	return &filemap_alloc_folio(gfp, 0)->page;
 }
 
-static inline gfp_t readahead_gfp_mask(struct address_space *x)
+static inline gfp_t __readahead_gfp_mask(struct address_space *x)
 {
 	return mapping_gfp_mask(x) | __GFP_NORETRY | __GFP_NOWARN;
 }
+
+gfp_t readahead_gfp_mask(struct address_space *x);
 
 typedef int filler_t(struct file *, struct folio *);
 
@@ -1337,6 +1354,9 @@ struct readahead_control {
 	bool dropbehind;
 	bool _workingset;
 	unsigned long _pflags;
+
+	ANDROID_OEM_DATA(1);
+	ANDROID_KABI_USE(1, pgoff_t _max_index); /* limit readahead to _max_index, inclusive */
 };
 
 #define DEFINE_READAHEAD(ractl, f, r, m, i)				\
@@ -1345,6 +1365,7 @@ struct readahead_control {
 		.mapping = m,						\
 		.ra = r,						\
 		._index = i,						\
+		._max_index = ULONG_MAX,				\
 	}
 
 #define VM_READAHEAD_PAGES	(SZ_128K / PAGE_SIZE)

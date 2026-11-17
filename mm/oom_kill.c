@@ -52,9 +52,13 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/oom.h>
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/mm.h>
 
 #undef CREATE_TRACE_POINTS
 #include <trace/hooks/mm.h>
+
+EXPORT_TRACEPOINT_SYMBOL_GPL(mark_victim);
 
 static int sysctl_panic_on_oom;
 static int sysctl_oom_kill_allocating_task;
@@ -141,7 +145,17 @@ struct task_struct *find_lock_task_mm(struct task_struct *p)
 	rcu_read_lock();
 
 	for_each_thread(p, t) {
-		task_lock(t);
+		if (in_nmi()) {
+			/*
+			 * task_lock() / task_unlock() wrap t->alloc_lock.
+			 * Open-code task_trylock() using spin_trylock() since
+			 * no helper exists in <linux/sched/task.h>.
+			 */
+			if (!spin_trylock(&t->alloc_lock))
+				continue;
+		} else {
+			task_lock(t);
+		}
 		if (likely(t->mm))
 			goto found;
 		task_unlock(t);
@@ -313,6 +327,7 @@ static int oom_evaluate_task(struct task_struct *task, void *arg)
 {
 	struct oom_control *oc = arg;
 	long points;
+	bool bypass = false;
 
 	if (oom_unkillable_task(task))
 		goto next;
@@ -341,6 +356,10 @@ static int oom_evaluate_task(struct task_struct *task, void *arg)
 		points = LONG_MAX;
 		goto select;
 	}
+
+	trace_android_vh_oom_evaluate_task_bypass(task, oc, &bypass);
+	if (bypass)
+		goto next;
 
 	points = oom_badness(task, oc->totalpages);
 	if (points == LONG_MIN || points < oc->chosen_points)
@@ -430,9 +449,13 @@ void dump_tasks(struct oom_control *oc)
 	pr_info("Tasks state (memory values in pages):\n");
 	pr_info("[  pid  ]   uid  tgid total_vm      rss rss_anon rss_file rss_shmem pgtables_bytes swapents oom_score_adj name\n");
 
-	if (is_memcg_oom(oc))
+	if (is_memcg_oom(oc)) {
+		if (in_nmi()) {
+			pr_warn("Memory cgroup task dump is not supported in NMI context\n");
+			return;
+		}
 		mem_cgroup_scan_tasks(oc->memcg, dump_task, oc);
-	else {
+	} else {
 		struct task_struct *p;
 		int i = 0;
 
@@ -536,6 +559,7 @@ static bool __oom_reap_task_mm(struct mm_struct *mm)
 	 * Reduce those races by reaping the oom victim from the other end
 	 * of the address space.
 	 */
+	trace_android_vh_oom_swapmem_gather_init(mm);
 	mas_for_each_rev(&mas, vma, 0) {
 		if (vma->vm_flags & (VM_HUGETLB|VM_PFNMAP))
 			continue;
@@ -568,6 +592,7 @@ static bool __oom_reap_task_mm(struct mm_struct *mm)
 			tlb_finish_mmu(&tlb);
 		}
 	}
+	trace_android_vh_oom_swapmem_gather_finish(mm);
 
 	return ret;
 }
@@ -806,6 +831,7 @@ void exit_oom_victim(void)
 {
 	clear_thread_flag(TIF_MEMDIE);
 
+	trace_android_vh_exit_oom_victim(current);
 	if (!atomic_dec_return(&oom_victims))
 		wake_up_all(&oom_victims_wait);
 }
@@ -850,6 +876,7 @@ bool oom_killer_disable(signed long timeout)
 	ret = wait_event_interruptible_timeout(oom_victims_wait,
 			!atomic_read(&oom_victims), timeout);
 	if (ret <= 0) {
+		trace_android_vh_oom_killer_disable(atomic_read(&oom_victims));
 		oom_killer_enable();
 		return false;
 	}

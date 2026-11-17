@@ -173,7 +173,6 @@ jitterentropy_rng-y := jitterentropy.o jitterentropy-kcapi.o
 obj-$(CONFIG_CRYPTO_JITTERENTROPY_TESTINTERFACE) += jitterentropy-testing.o
 obj-$(CONFIG_CRYPTO_BENCHMARK) += tcrypt.o
 obj-$(CONFIG_CRYPTO_GHASH) += ghash-generic.o
-obj-$(CONFIG_CRYPTO_POLYVAL) += polyval-generic.o
 obj-$(CONFIG_CRYPTO_USER_API) += af_alg.o
 obj-$(CONFIG_CRYPTO_USER_API_HASH) += algif_hash.o
 obj-$(CONFIG_CRYPTO_USER_API_SKCIPHER) += algif_skcipher.o
@@ -210,3 +209,56 @@ obj-$(CONFIG_CRYPTO_SIMD) += crypto_simd.o
 obj-$(CONFIG_CRYPTO_KDF800108_CTR) += kdf_sp800108.o
 
 obj-$(CONFIG_CRYPTO_KRB5) += krb5/
+
+ifneq ($(CONFIG_CRYPTO_FIPS140_MOD),)
+
+FIPS140_CFLAGS := -DBUILD_FIPS140_KO -include $(srctree)/crypto/fips140-defs.h
+
+CFLAGS_jitterentropy-fips.o := -O0
+KASAN_SANITIZE_jitterentropy-fips.o = n
+UBSAN_SANITIZE_jitterentropy-fips.o = n
+
+# Compile an extra copy of various crypto algorithms into the fips140 module.
+#
+# Note: the module will still work if some files are removed from here.
+# However, it may affect FIPS certifiability.  Don't remove files from here
+# without considering impact on FIPS certifiability.
+
+crypto-fips-objs := drbg.o ecb.o cbc.o ctr.o cts.o gcm.o xts.o hmac.o cmac.o \
+		    aes_generic.o \
+		    sha256.o \
+		    sha512.o \
+		    sha3_generic.o \
+		    jitterentropy.o \
+		    jitterentropy-kcapi.o
+crypto-fips-objs := $(foreach o,$(crypto-fips-objs),$(o:.o=-fips.o))
+
+$(obj)/%-fips.o: KBUILD_CFLAGS += $(FIPS140_CFLAGS)
+$(obj)/%-fips.o: $(src)/%.c FORCE
+	$(call if_changed_rule,cc_o_c)
+
+# get the crypto library to add its objects to $(crypto-fips-objs)
+include $(srctree)/lib/crypto/Kbuild.fips140
+
+# get the arch to add its objects to $(crypto-fips-objs)
+include $(srctree)/arch/$(ARCH)/crypto/Kbuild.fips140
+
+fips140-objs := \
+	fips140-alg-registration.o \
+	fips140-module.o \
+	fips140-refs.o \
+	fips140-selftests.o \
+	$(crypto-fips-objs)
+fips140-$(CONFIG_CRYPTO_FIPS140_MOD_EVAL_TESTING) += \
+	fips140-eval-testing.o
+obj-m += fips140.o
+
+CFLAGS_fips140-alg-registration.o += $(FIPS140_CFLAGS)
+CFLAGS_fips140-module.o += $(FIPS140_CFLAGS)
+CFLAGS_fips140-selftests.o += $(FIPS140_CFLAGS)
+CFLAGS_fips140-eval-testing.o += $(FIPS140_CFLAGS)
+
+hostprogs-always-y := fips140_gen_hmac
+HOSTLDLIBS_fips140_gen_hmac := -lcrypto -lelf
+
+endif

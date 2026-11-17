@@ -31,6 +31,8 @@
 #include <linux/kmemleak.h>
 #include <linux/sched.h>
 #include <linux/jiffies.h>
+#include <linux/gcma.h>
+#define CREATE_TRACE_POINTS
 #include <trace/events/cma.h>
 
 #include "internal.h"
@@ -38,6 +40,11 @@
 
 #undef CREATE_TRACE_POINTS
 #include <trace/hooks/mm.h>
+
+EXPORT_TRACEPOINT_SYMBOL_GPL(cma_alloc_start);
+EXPORT_TRACEPOINT_SYMBOL_GPL(cma_alloc_finish);
+EXPORT_TRACEPOINT_SYMBOL_GPL(cma_alloc_busy_retry);
+EXPORT_TRACEPOINT_SYMBOL_GPL(cma_release);
 
 struct cma cma_areas[MAX_CMA_AREAS];
 unsigned int cma_area_count;
@@ -168,11 +175,18 @@ static void __init cma_activate_area(struct cma *cma)
 			count = early_pfn[r] - cmr->base_pfn;
 			bitmap_count = cma_bitmap_pages_to_bits(cma, count);
 			bitmap_set(cmr->bitmap, 0, bitmap_count);
+		} else {
+			count = 0;
 		}
 
-		for (pfn = early_pfn[r]; pfn < cmr->base_pfn + cmr->count;
-		     pfn += pageblock_nr_pages)
-			init_cma_reserved_pageblock(pfn_to_page(pfn));
+		if (cma->gcma) {
+			register_gcma_area(cma->name, PFN_PHYS(early_pfn[r]),
+					   (cmr->count - count) << PAGE_SHIFT);
+		} else {
+			for (pfn = early_pfn[r]; pfn < cmr->base_pfn + cmr->count;
+			     pfn += pageblock_nr_pages)
+				init_cma_reserved_pageblock(pfn_to_page(pfn));
+		}
 	}
 
 	spin_lock_init(&cma->lock);
@@ -185,6 +199,8 @@ static void __init cma_activate_area(struct cma *cma)
 #endif
 	set_bit(CMA_ACTIVATED, &cma->flags);
 
+	android_init_vendor_data(cma, 1);
+
 	return;
 
 cleanup:
@@ -193,10 +209,13 @@ cleanup:
 
 	/* Expose all pages to the buddy, they are useless for CMA. */
 	if (!test_bit(CMA_RESERVE_PAGES_ON_ERROR, &cma->flags)) {
-		for (r = 0; r < allocrange; r++) {
+		for (r = 0; r < cma->nranges; r++) {
+			unsigned long start_pfn;
+
 			cmr = &cma->ranges[r];
+			start_pfn = r <= allocrange ? early_pfn[r] : cmr->early_pfn;
 			end_pfn = cmr->base_pfn + cmr->count;
-			for (pfn = early_pfn[r]; pfn < end_pfn; pfn++)
+			for (pfn = start_pfn; pfn < end_pfn; pfn++)
 				free_reserved_page(pfn_to_page(pfn));
 		}
 	}
@@ -223,7 +242,7 @@ void __init cma_reserve_pages_on_error(struct cma *cma)
 
 static int __init cma_new_area(const char *name, phys_addr_t size,
 			       unsigned int order_per_bit,
-			       struct cma **res_cma)
+			       struct cma **res_cma, bool gcma)
 {
 	struct cma *cma;
 
@@ -242,7 +261,8 @@ static int __init cma_new_area(const char *name, phys_addr_t size,
 	if (name)
 		snprintf(cma->name, CMA_MAX_NAME, "%s", name);
 	else
-		snprintf(cma->name, CMA_MAX_NAME,  "cma%d\n", cma_area_count);
+		snprintf(cma->name, CMA_MAX_NAME,
+			 gcma ? "gcma%d\n" : "cma%d\n", cma_area_count);
 
 	cma->available_count = cma->count = size >> PAGE_SHIFT;
 	cma->order_per_bit = order_per_bit;
@@ -273,7 +293,7 @@ static void __init cma_drop_area(struct cma *cma)
 int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 				 unsigned int order_per_bit,
 				 const char *name,
-				 struct cma **res_cma)
+				 struct cma **res_cma, bool gcma)
 {
 	struct cma *cma;
 	int ret;
@@ -295,7 +315,7 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 	if (!IS_ALIGNED(base | size, CMA_MIN_ALIGNMENT_BYTES))
 		return -EINVAL;
 
-	ret = cma_new_area(name, size, order_per_bit, &cma);
+	ret = cma_new_area(name, size, order_per_bit, &cma, gcma);
 	if (ret != 0)
 		return ret;
 
@@ -304,6 +324,7 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 	cma->ranges[0].count = cma->count;
 	cma->nranges = 1;
 	cma->nid = NUMA_NO_NODE;
+	cma->gcma = gcma;
 
 	*res_cma = cma;
 
@@ -510,7 +531,8 @@ static int __init __cma_declare_contiguous_nid(phys_addr_t *basep,
 		kmemleak_ignore_phys(base);
 	}
 
-	ret = cma_init_reserved_mem(base, size, order_per_bit, name, res_cma);
+	ret = cma_init_reserved_mem(base, size, order_per_bit, name, res_cma,
+				    false);
 	if (ret) {
 		memblock_phys_free(base, size);
 		return ret;
@@ -574,7 +596,7 @@ int __init cma_declare_contiguous_multi(phys_addr_t total_size,
 	sizesum = 0;
 	failed = NULL;
 
-	ret = cma_new_area(name, total_size, order_per_bit, &cma);
+	ret = cma_new_area(name, total_size, order_per_bit, &cma, false);
 	if (ret != 0)
 		goto out;
 
@@ -804,6 +826,7 @@ static int cma_range_alloc(struct cma *cma, struct cma_memrange *cmr,
 
 	trace_android_vh_cma_alloc_retry(cma->name, &max_retries);
 	for (start = 0; ; start = bitmap_no + mask + 1) {
+retry:
 		spin_lock_irq(&cma->lock);
 		/*
 		 * If the request is larger than the available number
@@ -816,6 +839,11 @@ static int cma_range_alloc(struct cma *cma, struct cma_memrange *cmr,
 		bitmap_no = bitmap_find_next_zero_area_off(cmr->bitmap,
 				bitmap_maxno, start, bitmap_count, mask,
 				offset);
+#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA
+		trace_android_rvh_bitmap_find_best_next_area(cmr->bitmap,
+				bitmap_maxno, start, bitmap_count, mask,
+				offset, &bitmap_no, cma->android_vendor_data1);
+#endif
 		if (bitmap_no >= bitmap_maxno) {
 			if ((num_attempts < max_retries) && (ret == -EBUSY)) {
 				spin_unlock_irq(&cma->lock);
@@ -835,7 +863,7 @@ static int cma_range_alloc(struct cma *cma, struct cma_memrange *cmr,
 				ret = -ENOMEM;
 				schedule_timeout_killable(msecs_to_jiffies(100));
 				num_attempts++;
-				continue;
+				goto retry;
 			} else {
 				spin_unlock_irq(&cma->lock);
 				break;
@@ -866,9 +894,14 @@ static int cma_range_alloc(struct cma *cma, struct cma_memrange *cmr,
 		 */
 		spin_unlock_irq(&cma->lock);
 
-		mutex_lock(&cma->alloc_mutex);
-		ret = alloc_contig_range(pfn, pfn + count, ACR_FLAGS_CMA, gfp);
-		mutex_unlock(&cma->alloc_mutex);
+		if (cma->gcma) {
+			gcma_alloc_range(pfn, pfn + count - 1, gfp);
+			ret = 0;
+		} else {
+			mutex_lock(&cma->alloc_mutex);
+			ret = alloc_contig_range(pfn, pfn + count, ACR_FLAGS_CMA, gfp);
+			mutex_unlock(&cma->alloc_mutex);
+		}
 		if (!ret)
 			break;
 
@@ -892,14 +925,27 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 {
 	struct page *page = NULL;
 	int ret = -ENOMEM, r;
+	gfp_t gfp_allowed;
 	unsigned long i;
 	const char *name = cma ? cma->name : NULL;
+	bool bypass = false;
+	u64 stime = 0;
 
-	if (WARN_ON_ONCE((gfp & GFP_KERNEL) == 0 ||
-		(gfp & ~(GFP_KERNEL|__GFP_NOWARN|__GFP_NORETRY)) != 0))
+	/*
+	 * GCMA allows GFP_ATOMIC, while CMA can only do GFP_KERNEL.
+	 * Both support optional flags NOWARN|NORETRY
+	 */
+	gfp_allowed = GFP_KERNEL | (cma->gcma ? GFP_ATOMIC : 0);
+	if (WARN_ON_ONCE((gfp & gfp_allowed) == 0 ||
+		(gfp & ~(gfp_allowed | __GFP_NOWARN | __GFP_NORETRY)) != 0))
 		return page;
 
 	if (!cma || !cma->count)
+		return page;
+
+	trace_android_vh_cma_alloc_bypass(cma, count, align, gfp,
+				&page, &bypass);
+	if (bypass)
 		return page;
 
 	pr_debug("%s(cma %p, name: %s, count %lu, align %d)\n", __func__,
@@ -910,6 +956,7 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 
 	trace_cma_alloc_start(name, count, cma->available_count, cma->count, align);
 
+	trace_android_vh_cma_alloc_lat_start(&stime);
 	for (r = 0; r < cma->nranges; r++) {
 		page = NULL;
 
@@ -938,6 +985,8 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 	pr_debug("%s(): returned %p\n", __func__, page);
 	trace_cma_alloc_finish(name, page ? page_to_pfn(page) : 0,
 			       page, count, align, ret);
+	trace_android_vh_cma_alloc_end(cma, page ? page_to_pfn(page) : 0, page, count, align, ret);
+	trace_android_vh_cma_alloc_lat_end(stime, count);
 	if (page) {
 		count_vm_event(CMA_ALLOC_SUCCESS);
 		cma_sysfs_account_success_pages(cma, count);
@@ -1025,6 +1074,7 @@ bool cma_release(struct cma *cma, const struct page *pages,
 	struct cma_memrange *cmr;
 	unsigned long pfn, end_pfn;
 	int r;
+	bool bypass = false;
 
 	pr_debug("%s(page %p, count %lu)\n", __func__, (void *)pages, count);
 
@@ -1046,7 +1096,14 @@ bool cma_release(struct cma *cma, const struct page *pages,
 	if (r == cma->nranges)
 		return false;
 
-	free_contig_range(pfn, count);
+	trace_android_vh_cma_release_bypass(cma, pages, count, &bypass);
+	if (bypass)
+		return true;
+
+	if (cma->gcma)
+		gcma_free_range(pfn, pfn + count - 1);
+	else
+		free_contig_range(pfn, count);
 	cma_clear_bitmap(cma, cmr, pfn, count);
 	cma_sysfs_account_release_pages(cma, count);
 	trace_cma_release(cma->name, pfn, pages, count);

@@ -18,6 +18,7 @@
 //
 // Stable since Rust 1.79.0.
 #![feature(generic_nonzero)]
+#![feature(asm_goto)]
 #![feature(inline_const)]
 #![feature(pointer_is_aligned)]
 //
@@ -63,6 +64,7 @@ pub use ffi;
 
 pub mod acpi;
 pub mod alloc;
+pub mod anon_inodes;
 #[cfg(CONFIG_AUXILIARY_BUS)]
 pub mod auxiliary;
 pub mod bitmap;
@@ -85,6 +87,7 @@ pub mod device;
 pub mod device_id;
 pub mod devres;
 pub mod dma;
+pub mod dma_buf;
 pub mod driver;
 #[cfg(CONFIG_DRM = "y")]
 pub mod drm;
@@ -95,7 +98,10 @@ pub mod firmware;
 pub mod fmt;
 pub mod fs;
 pub mod id_pool;
+#[doc(hidden)]
+pub mod impl_flags;
 pub mod init;
+pub mod interrupt;
 pub mod io;
 pub mod ioctl;
 pub mod iov;
@@ -107,12 +113,14 @@ pub mod list;
 pub mod maple_tree;
 pub mod miscdevice;
 pub mod mm;
+pub mod module_param;
 #[cfg(CONFIG_NET)]
 pub mod net;
 pub mod of;
 #[cfg(CONFIG_PM_OPP)]
 pub mod opp;
 pub mod page;
+pub mod page_size_compat;
 #[cfg(CONFIG_PCI)]
 pub mod pci;
 pub mod pid_namespace;
@@ -121,6 +129,7 @@ pub mod prelude;
 pub mod print;
 pub mod processor;
 pub mod ptr;
+pub mod ratelimit;
 pub mod rbtree;
 pub mod regulator;
 pub mod revocable;

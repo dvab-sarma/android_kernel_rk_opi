@@ -62,6 +62,10 @@ module_param_named(enable_unsafe_noiommu_mode,
 MODULE_PARM_DESC(enable_unsafe_noiommu_mode, "Enable UNSAFE, no-IOMMU mode.  This mode provides no device isolation, no DMA translation, no host kernel protection, cannot be used for device assignment to virtual machines, requires RAWIO permissions, and will taint the kernel.  If you do not know what this is for, step away. (default: false)");
 #endif
 
+bool allow_non_coherent __read_mostly;
+module_param(allow_non_coherent, bool, 0444);
+MODULE_PARM_DESC(allow_non_coherent, "Allow binding of non-coherent devices, not supported with type1 IOMMU. (default: false)");
+
 static DEFINE_XARRAY(vfio_device_set_xa);
 
 int vfio_assign_device_set(struct vfio_device *device, void *set_id)
@@ -343,7 +347,8 @@ static int __vfio_register_dev(struct vfio_device *device,
 	 * valid for cases where we are using iommu groups.
 	 */
 	if (type == VFIO_IOMMU && !vfio_device_is_noiommu(device) &&
-	    !device_iommu_capable(device->dev, IOMMU_CAP_CACHE_COHERENCY)) {
+	    !device_iommu_capable(device->dev, IOMMU_CAP_CACHE_COHERENCY)
+		&& !allow_non_coherent) {
 		ret = -EINVAL;
 		goto err_out;
 	}
@@ -396,6 +401,13 @@ void vfio_unregister_group_dev(struct vfio_device *device)
 	vfio_device_group_unregister(device);
 
 	/*
+	 * Remove debugfs before device_del(), which releases devres.  Some
+	 * debugfs entries are created with debugfs_create_devm_seqfile() and
+	 * therefore rely on devres-managed inode private data.
+	 */
+	vfio_device_debugfs_exit(device);
+
+	/*
 	 * Balances vfio_device_add() in register path, also prevents
 	 * new device opened by userspace in the cdev path.
 	 */
@@ -424,7 +436,6 @@ void vfio_unregister_group_dev(struct vfio_device *device)
 		}
 	}
 
-	vfio_device_debugfs_exit(device);
 	/* Balances vfio_device_set_group in register path */
 	vfio_device_remove_group(device);
 }
@@ -442,6 +453,13 @@ void vfio_device_get_kvm_safe(struct vfio_device *device, struct kvm *kvm)
 	if (!kvm)
 		return;
 
+	/* See kvm_vfio_file_set_kvm() */
+#if IS_BUILTIN(CONFIG_KVM)
+	ret = kvm_get_kvm_safe(kvm);
+	pfn = kvm_put_kvm;
+	/* silence compiler warning */
+	fn = NULL;
+#else
 	pfn = symbol_get(kvm_put_kvm);
 	if (WARN_ON(!pfn))
 		return;
@@ -458,6 +476,7 @@ void vfio_device_get_kvm_safe(struct vfio_device *device, struct kvm *kvm)
 		symbol_put(kvm_put_kvm);
 		return;
 	}
+#endif
 
 	device->put_kvm = pfn;
 	device->kvm = kvm;
@@ -475,7 +494,9 @@ void vfio_device_put_kvm(struct vfio_device *device)
 
 	device->put_kvm(device->kvm);
 	device->put_kvm = NULL;
+#if IS_MODULE(CONFIG_KVM)
 	symbol_put(kvm_put_kvm);
+#endif
 
 clear:
 	device->kvm = NULL;
@@ -859,7 +880,8 @@ int vfio_mig_get_next_state(struct vfio_device *device,
 	 * logical state, as per the above comment.
 	 */
 	*next_fsm = vfio_from_fsm_table[cur_fsm][new_fsm];
-	while ((state_flags_table[*next_fsm] & device->migration_flags) !=
+	while (*next_fsm != VFIO_DEVICE_STATE_ERROR &&
+	       (state_flags_table[*next_fsm] & device->migration_flags) !=
 			state_flags_table[*next_fsm])
 		*next_fsm = vfio_from_fsm_table[*next_fsm][new_fsm];
 

@@ -35,7 +35,7 @@ int smmu_add_cmd(struct hyp_arm_smmu_v3_device *smmu,
 		return ret;
 
 	smmu_add_cmd_raw(smmu, cmd);
-	writel_relaxed(smmu->cmdq.llq.prod, smmu->cmdq.prod_reg);
+	writel(smmu->cmdq.llq.prod, smmu->cmdq.prod_reg);
 	return 0;
 }
 
@@ -52,4 +52,12 @@ int smmu_sync_cmd(struct hyp_arm_smmu_v3_device *smmu)
 
 	return smmu_wait(smmu->features & ARM_SMMU_FEAT_SEV,
 			 smmu_cmdq_empty(&smmu->cmdq));
+}
+
+bool smmu_cmdq_has_space(struct arm_smmu_queue *cmdq, u32 n)
+{
+	struct arm_smmu_ll_queue *llq = &cmdq->llq;
+
+	WRITE_ONCE(llq->cons, readl_relaxed(cmdq->cons_reg));
+	return queue_has_space(llq, n);
 }

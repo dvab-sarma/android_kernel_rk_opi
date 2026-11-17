@@ -28,6 +28,7 @@
 #include <ufs/ufs_quirks.h>
 #include <ufs/ufshci.h>
 #include <linux/android_vendor.h>
+#include <linux/android_kabi.h>
 
 #define UFSHCD "ufshcd"
 
@@ -203,6 +204,8 @@ struct ufshcd_lrb {
 	int crypto_key_slot;
 	u64 data_unit_num;
 #endif
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -293,6 +296,88 @@ struct ufs_pwr_mode_info {
 	struct ufs_pa_layer_attr info;
 };
 
+#define UFS_MAX_LANES	2
+
+/**
+ * struct tx_eqtr_iter - TX Equalization Training iterator
+ * @preshoot_bitmap: PreShoot bitmap
+ * @deemphasis_bitmap: DeEmphasis bitmap
+ * @preshoot: PreShoot value
+ * @deemphasis: DeEmphasis value
+ * @fom: Figure-of-Merit read out from RX_FOM
+ * @is_updated: Flag to indicate if updated since previous iteration
+ */
+struct tx_eqtr_iter {
+	unsigned long preshoot_bitmap;
+	unsigned long deemphasis_bitmap;
+	u8 preshoot;
+	u8 deemphasis;
+	u8 fom[UFS_MAX_LANES];
+	bool is_updated;
+};
+
+/**
+ * struct ufshcd_tx_eq_settings - TX Equalization settings
+ * @preshoot: PreShoot value
+ * @deemphasis: DeEmphasis value
+ * @fom_val: Figure-of-Merit value read out from RX_FOM (Bit[6:0])
+ * @precode_en: Flag to indicate whether need to enable pre-coding
+ */
+struct ufshcd_tx_eq_settings {
+	u8 preshoot;
+	u8 deemphasis;
+	u8 fom_val;
+	bool precode_en;
+};
+
+/**
+ * struct ufshcd_tx_eqtr_data - Data used during TX Equalization Training procedure
+ * @host: Optimal TX EQ settings identified for host TX Lanes during TX EQTR
+ * @device: Optimal TX EQ settings identified for device TX Lanes during TX EQTR
+ * @host_fom: Host TX EQTR FOM record
+ * @device_fom: Device TX EQTR FOM record
+ */
+struct ufshcd_tx_eqtr_data {
+	struct ufshcd_tx_eq_settings host[UFS_MAX_LANES];
+	struct ufshcd_tx_eq_settings device[UFS_MAX_LANES];
+	u8 host_fom[UFS_MAX_LANES][TX_HS_NUM_PRESHOOT][TX_HS_NUM_DEEMPHASIS];
+	u8 device_fom[UFS_MAX_LANES][TX_HS_NUM_PRESHOOT][TX_HS_NUM_DEEMPHASIS];
+};
+
+/**
+ * struct ufshcd_tx_eqtr_record - TX Equalization Training record
+ * @host_fom: Host TX EQTR FOM record
+ * @device_fom: Device TX EQTR FOM record
+ * @last_record_ts: Timestamp of the most recent TX EQTR record
+ * @last_record_index: Index of the most recent TX EQTR record
+ * @saved_adapt_eqtr: Saved Adaptation length setting for TX EQTR
+ */
+struct ufshcd_tx_eqtr_record {
+	u8 host_fom[UFS_MAX_LANES][TX_HS_NUM_PRESHOOT][TX_HS_NUM_DEEMPHASIS];
+	u8 device_fom[UFS_MAX_LANES][TX_HS_NUM_PRESHOOT][TX_HS_NUM_DEEMPHASIS];
+	ktime_t last_record_ts;
+	u16 last_record_index;
+	u16 saved_adapt_eqtr;
+};
+
+/**
+ * struct ufshcd_tx_eq_params - TX Equalization parameters structure
+ * @host: TX EQ settings for host TX Lanes
+ * @device: TX EQ settings for device TX Lanes
+ * @eqtr_record: Pointer to TX EQTR record
+ * @is_valid: True if parameter contains valid TX Equalization settings
+ * @is_applied: True if settings have been applied to UniPro of both sides
+ * @from_dt: True if settings are from Device Tree
+ */
+struct ufshcd_tx_eq_params {
+	struct ufshcd_tx_eq_settings host[UFS_MAX_LANES];
+	struct ufshcd_tx_eq_settings device[UFS_MAX_LANES];
+	struct ufshcd_tx_eqtr_record *eqtr_record;
+	bool is_valid;
+	bool is_applied;
+	ANDROID_KABI_IGNORE(1, bool from_dt);
+};
+
 /**
  * struct ufs_hba_variant_ops - variant specific callbacks
  * @name: variant name
@@ -308,11 +393,10 @@ struct ufs_pwr_mode_info {
  *                     variant specific Uni-Pro initialization.
  * @link_startup_notify: called before and after Link startup is carried out
  *                       to allow variant specific Uni-Pro initialization.
+ * @negotiate_pwr_mode: called to negotiate power mode.
  * @pwr_change_notify: called before and after a power mode change
  *			is carried out to allow vendor spesific capabilities
- *			to be set. PRE_CHANGE can modify final_params based
- *			on desired_pwr_mode, but POST_CHANGE must not alter
- *			the final_params parameter
+ *			to be set.
  * @setup_xfer_req: called before any transfer request is issued
  *                  to set some things
  * @setup_task_mgmt: called before any task management request is issued
@@ -337,6 +421,11 @@ struct ufs_pwr_mode_info {
  * @config_esi: called to config Event Specific Interrupt
  * @config_scsi_dev: called to configure SCSI device parameters
  * @freq_to_gear_speed: called to map clock frequency to the max supported gear speed
+ * @apply_tx_eqtr_settings: called to apply settings for TX Equalization
+ *	Training settings.
+ * @get_rx_fom: called to get Figure of Merit (FOM) value.
+ * @tx_eqtr_notify: called before and after TX Equalization Training procedure
+ *	to allow platform vendor specific configs to take place.
  */
 struct ufs_hba_variant_ops {
 	const char *name;
@@ -353,10 +442,12 @@ struct ufs_hba_variant_ops {
 				     enum ufs_notify_change_status);
 	int	(*link_startup_notify)(struct ufs_hba *,
 				       enum ufs_notify_change_status);
-	int	(*pwr_change_notify)(struct ufs_hba *,
-			enum ufs_notify_change_status status,
-			const struct ufs_pa_layer_attr *desired_pwr_mode,
-			struct ufs_pa_layer_attr *final_params);
+	int	(*negotiate_pwr_mode)(struct ufs_hba *hba,
+				      const struct ufs_pa_layer_attr *desired_pwr_mode,
+				      struct ufs_pa_layer_attr *final_params);
+	int	(*pwr_change_notify)(struct ufs_hba *hba,
+				     enum ufs_notify_change_status status,
+				     struct ufs_pa_layer_attr *final_params);
 	void	(*setup_xfer_req)(struct ufs_hba *hba, int tag,
 				  bool is_scsi_cmd);
 	void	(*setup_task_mgmt)(struct ufs_hba *, int, u8);
@@ -386,6 +477,17 @@ struct ufs_hba_variant_ops {
 	int	(*config_esi)(struct ufs_hba *hba);
 	void	(*config_scsi_dev)(struct scsi_device *sdev);
 	u32	(*freq_to_gear_speed)(struct ufs_hba *hba, unsigned long freq);
+	int	(*get_rx_fom)(struct ufs_hba *hba,
+			      struct ufs_pa_layer_attr *pwr_mode,
+			      struct tx_eqtr_iter *h_iter,
+			      struct tx_eqtr_iter *d_iter);
+	int	(*apply_tx_eqtr_settings)(struct ufs_hba *hba,
+					  struct ufs_pa_layer_attr *pwr_mode,
+					  struct tx_eqtr_iter *h_iter,
+					  struct tx_eqtr_iter *d_iter);
+	int	(*tx_eqtr_notify)(struct ufs_hba *hba,
+				  enum ufs_notify_change_status status,
+				  struct ufs_pa_layer_attr *pwr_mode);
 };
 
 /* clock gating state  */
@@ -431,6 +533,8 @@ struct ufs_clk_gating {
 	bool is_enabled;
 	bool is_initialized;
 	int active_reqs;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -482,6 +586,8 @@ struct ufs_clk_scaling {
 	bool is_busy_started;
 	bool is_suspended;
 	bool suspend_on_no_request;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 #define UFS_EVENT_HIST_LENGTH 8
@@ -532,6 +638,17 @@ enum ufshcd_state {
 	UFSHCD_STATE_EH_SCHEDULED_NON_FATAL,
 	UFSHCD_STATE_EH_SCHEDULED_FATAL,
 	UFSHCD_STATE_ERROR,
+};
+
+/**
+ * enum ufshcd_pmc_policy - Power Mode change policy
+ * @UFSHCD_PMC_POLICY_DONT_FORCE: Do not force a Power Mode change.
+ * @UFSHCD_PMC_POLICY_FORCE: Force a Power Mode change even if current Power
+ *	Mode is same as target Power Mode.
+ */
+enum ufshcd_pmc_policy {
+	UFSHCD_PMC_POLICY_DONT_FORCE,
+	UFSHCD_PMC_POLICY_FORCE,
 };
 
 enum ufshcd_quirks {
@@ -696,6 +813,27 @@ enum ufshcd_quirks {
 	 * because it causes link startup to become unreliable.
 	 */
 	UFSHCD_QUIRK_PERFORM_LINK_STARTUP_ONCE		= 1 << 26,
+
+	/*
+	 * On some platforms, the VCC regulator has a slow ramp-up time. Add a
+	 * delay after enabling VCC to ensure it's stable.
+	 */
+	UFSHCD_QUIRK_VCC_ON_DELAY			= 1 << 27,
+
+	/*
+	 * This quirk indicates that Host supports TX Equalization Training
+	 * (EQTR) using Adapt L0L1L2L3 length which is larger than what is
+	 * allowed by M-PHY spec ver 6.0.
+	 */
+	UFSHCD_QUIRK_EXTENDED_TX_EQTR_ADAPT_LENGTH_L0L1L2L3	= 1 << 28,
+};
+
+enum ufshcd_android_quirks {
+	/* Set IID to one. */
+	UFSHCD_ANDROID_QUIRK_SET_IID_TO_ONE		= 1 << 30,
+
+	/* AH8 being enabled may break DME */
+	UFSHCD_ANDROID_QUIRK_AH8_BREAKS_DME             = 1 << 31,
 };
 
 enum ufshcd_caps {
@@ -773,6 +911,13 @@ enum ufshcd_caps {
 	 * WriteBooster when scaling the clock down.
 	 */
 	UFSHCD_CAP_WB_WITH_CLK_SCALING			= 1 << 12,
+
+	/*
+	 * This capability allows the host controller driver to apply TX
+	 * Equalization settings discovered from UFS attributes, variant
+	 * specific operations and TX Equaliztion Training procedure.
+	 */
+	UFSHCD_CAP_TX_EQUALIZATION			= 1 << 13,
 };
 
 struct ufs_hba_variant_params {
@@ -860,6 +1005,7 @@ enum ufshcd_mcq_opr {
  * @is_irq_enabled: whether or not the UFS controller interrupt is enabled.
  * @dev_ref_clk_freq: reference clock frequency
  * @quirks: bitmask with information about deviations from the UFSHCI standard.
+ * @android_quirks: Android-specific deviations from the UFSHCI standard.
  * @dev_quirks: bitmask with information about deviations from the UFS standard.
  * @tmf_tag_set: TMF tag set.
  * @tmf_queue: Used to allocate TMF tags.
@@ -887,7 +1033,6 @@ enum ufshcd_mcq_opr {
  * @saved_uic_err: sticky UIC error mask
  * @ufs_stats: various error counters
  * @force_reset: flag to force eh_work perform a full reset
- * @force_pmc: flag to force a power mode change
  * @silence_err_logs: flag to silence error logs
  * @dev_cmd: ufs device management command information
  * @last_dme_cmd_tstamp: time stamp of the last completed DME command
@@ -951,6 +1096,20 @@ enum ufshcd_mcq_opr {
  * @dev_lvl_exception_count: count of device level exceptions since last reset
  * @dev_lvl_exception_id: vendor specific information about the
  * device level exception event.
+ * @dme_qos_notification: Bitfield of pending DME Quality of Service (QoS)
+ *	events. Bits[3:1] reflect the corresponding bits of UIC DME Error Code
+ *	field within the Host Controller's UECDME register. Bit[0] is a flag
+ *	indicating that the DME QoS Monitor has been reset by the host.
+ * @dme_qos_sysfs_handle: handle for 'dme_qos_notification' sysfs entry
+ * @host_preshoot_cap: a bitfield to indicate supported PreShoot dBs of host's TX lanes, cache of
+ *	host M-PHY TX_HS_PreShoot_Setting_Capability Attribute (ID 0x15)
+ * @host_deemphasis_cap: a bitfield to indicate supported DeEmphasis dBs of host's TX lanes, cache
+ *	of host M-PHY TX_HS_DeEmphasis_Setting_Capability Attribute (ID 0x12)
+ * @device_preshoot_cap: a bitfield to indicate supported PreShoot dBs of device's TX lanes, cache
+ *	of device M-PHY TX_HS_PreShoot_Setting_Capability Attribute (ID 0x15)
+ * @device_deemphasis_cap: a bitfield to indicate supported DeEmphasis dBs of device's TX lanes,
+ *	cache of device M-PHY TX_HS_DeEmphasis_Setting_Capability Attribute (ID 0x12)
+ * @tx_eq_params: TX Equalization settings
  */
 struct ufs_hba {
 	void __iomem *mmio_base;
@@ -1009,6 +1168,8 @@ struct ufs_hba {
 
 	unsigned int quirks;	/* Deviations from standard UFSHCI spec. */
 
+	unsigned int android_quirks;
+
 	/* Device deviations from standard UFS device spec. */
 	unsigned int dev_quirks;
 
@@ -1043,7 +1204,6 @@ struct ufs_hba {
 	u32 saved_uic_err;
 	struct ufs_stats ufs_stats;
 	bool force_reset;
-	bool force_pmc;
 	bool silence_err_logs;
 
 	/* Device management request data */
@@ -1126,6 +1286,16 @@ struct ufs_hba {
 	atomic_t dev_lvl_exception_count;
 	u64 dev_lvl_exception_id;
 
+	atomic_t dme_qos_notification;
+	struct kernfs_node *dme_qos_sysfs_handle;
+
+	u32 vcc_off_delay_us;
+
+	u8 host_preshoot_cap;
+	u8 host_deemphasis_cap;
+	u8 device_preshoot_cap;
+	u8 device_deemphasis_cap;
+	struct ufshcd_tx_eq_params tx_eq_params[UFS_HS_GEAR_MAX];
 	ANDROID_OEM_DATA(1);
 };
 
@@ -1271,6 +1441,13 @@ static inline bool ufshcd_enable_wb_if_scaling_up(struct ufs_hba *hba)
 	return hba->caps & UFSHCD_CAP_WB_WITH_CLK_SCALING;
 }
 
+static inline bool ufshcd_is_tx_eq_supported(struct ufs_hba *hba)
+{
+	return hba->caps & UFSHCD_CAP_TX_EQUALIZATION &&
+	       hba->ufs_version >= ufshci_version(5, 0) &&
+	       hba->dev_info.wspecversion >= 0x500;
+}
+
 #define ufsmcq_writel(hba, val, reg)	\
 	writel((val), (hba)->mcq_base + (reg))
 #define ufsmcq_readl(hba, reg)	\
@@ -1285,6 +1462,18 @@ static inline bool ufshcd_enable_wb_if_scaling_up(struct ufs_hba *hba)
 	writel((val), (hba)->mmio_base + (reg))
 #define ufshcd_readl(hba, reg)	\
 	readl((hba)->mmio_base + (reg))
+
+static inline const char *ufs_hs_rate_to_str(enum ufs_hs_gear_rate rate)
+{
+	switch (rate) {
+	case PA_HS_MODE_A:
+		return "A";
+	case PA_HS_MODE_B:
+		return "B";
+	default:
+		return "Unknown";
+	}
+}
 
 /**
  * ufshcd_rmwl - perform read/modify/write for a controller register
@@ -1305,7 +1494,6 @@ static inline void ufshcd_rmwl(struct ufs_hba *hba, u32 mask, u32 val, u32 reg)
 
 void ufshcd_enable_irq(struct ufs_hba *hba);
 void ufshcd_disable_irq(struct ufs_hba *hba);
-void ufshcd_enable_intr(struct ufs_hba *hba, u32 intrs);
 int ufshcd_alloc_host(struct device *, struct ufs_hba **);
 int ufshcd_hba_enable(struct ufs_hba *hba);
 int ufshcd_init(struct ufs_hba *, void __iomem *, unsigned int);
@@ -1323,6 +1511,9 @@ void ufshcd_mcq_config_mac(struct ufs_hba *hba, u32 max_active_cmds);
 unsigned int ufshcd_mcq_queue_cfg_addr(struct ufs_hba *hba);
 u32 ufshcd_mcq_read_cqis(struct ufs_hba *hba, int i);
 void ufshcd_mcq_write_cqis(struct ufs_hba *hba, u32 val, int i);
+unsigned long ufshcd_mcq_poll_n_cqe_lock(struct ufs_hba *hba,
+					 struct ufs_hw_queue *hwq,
+					 unsigned int max_compl);
 unsigned long ufshcd_mcq_poll_cqe_lock(struct ufs_hba *hba,
 					 struct ufs_hw_queue *hwq);
 void ufshcd_mcq_make_queues_operational(struct ufs_hba *hba);
@@ -1354,17 +1545,13 @@ static inline void *ufshcd_get_variant(struct ufs_hba *hba)
 	return hba->priv;
 }
 
-#ifdef CONFIG_PM
 extern int ufshcd_runtime_suspend(struct device *dev);
 extern int ufshcd_runtime_resume(struct device *dev);
-#endif
-#ifdef CONFIG_PM_SLEEP
 extern int ufshcd_system_suspend(struct device *dev);
 extern int ufshcd_system_resume(struct device *dev);
 extern int ufshcd_system_freeze(struct device *dev);
 extern int ufshcd_system_thaw(struct device *dev);
 extern int ufshcd_system_restore(struct device *dev);
-#endif
 
 extern int ufshcd_dme_reset(struct ufs_hba *hba);
 extern int ufshcd_dme_enable(struct ufs_hba *hba);
@@ -1375,9 +1562,16 @@ extern int ufshcd_dme_set_attr(struct ufs_hba *hba, u32 attr_sel,
 			       u8 attr_set, u32 mib_val, u8 peer);
 extern int ufshcd_dme_get_attr(struct ufs_hba *hba, u32 attr_sel,
 			       u32 *mib_val, u8 peer);
+extern int ufshcd_change_power_mode(struct ufs_hba *hba,
+				    struct ufs_pa_layer_attr *pwr_mode,
+				    enum ufshcd_pmc_policy pmc_policy);
 extern int ufshcd_config_pwr_mode(struct ufs_hba *hba,
-			struct ufs_pa_layer_attr *desired_pwr_mode);
+				  struct ufs_pa_layer_attr *desired_pwr_mode,
+				  enum ufshcd_pmc_policy pmc_policy);
 extern int ufshcd_uic_change_pwr_mode(struct ufs_hba *hba, u8 mode);
+extern int ufshcd_apply_tx_eq_settings(struct ufs_hba *hba,
+				       struct ufshcd_tx_eq_params *params,
+				       u32 gear);
 
 /* UIC command interfaces for DME primitives */
 #define DME_LOCAL	0
@@ -1438,6 +1632,12 @@ static inline int ufshcd_disable_host_tx_lcc(struct ufs_hba *hba)
 	return ufshcd_dme_set(hba, UIC_ARG_MIB(PA_LOCAL_TX_LCC_ENABLE), 0);
 }
 
+int ufshcd_read_desc_param(struct ufs_hba *hba, enum desc_idn desc_id,
+			   int desc_index, u8 param_offset, u8 *param_read_buf,
+			   u8 param_size);
+int ufshcd_query_attr_retry(struct ufs_hba *hba, enum query_opcode opcode,
+			    enum attr_idn idn, u8 index, u8 selector,
+			    u32 *attr_val);
 int ufshcd_query_flag_retry(struct ufs_hba *hba,
 	enum query_opcode opcode, enum flag_idn idn, u8 index, bool *flag_res);
 
@@ -1502,5 +1702,36 @@ int ufshcd_write_ee_control(struct ufs_hba *hba);
 int ufshcd_update_ee_control(struct ufs_hba *hba, u16 *mask,
 			     const u16 *other_mask, u16 set, u16 clr);
 void ufshcd_force_error_recovery(struct ufs_hba *hba);
+void ufshcd_ahit_disable(struct ufs_hba *hba);
+void ufshcd_ahit_enable(struct ufs_hba *hba);
+
+/*
+ * The functions below are present in ufshcd-priv.h in the upstream kernel and
+ * in <ufs/ufshcd.h> in the Android kernel.
+ */
+
+#define HAVE_UFSHCD_RPM_GET_SYNC
+
+static inline u8 ufshcd_wb_get_query_index(struct ufs_hba *hba)
+{
+	if (hba->dev_info.wb_buffer_type == WB_BUF_MODE_LU_DEDICATED)
+		return hba->dev_info.wb_dedicated_lu;
+	return 0;
+}
+
+static inline int ufshcd_rpm_get_sync(struct ufs_hba *hba)
+{
+	return pm_runtime_get_sync(&hba->ufs_device_wlun->sdev_gendev);
+}
+
+static inline int ufshcd_rpm_put_sync(struct ufs_hba *hba)
+{
+	return pm_runtime_put_sync(&hba->ufs_device_wlun->sdev_gendev);
+}
+
+static inline int ufshcd_rpm_put(struct ufs_hba *hba)
+{
+	return pm_runtime_put(&hba->ufs_device_wlun->sdev_gendev);
+}
 
 #endif /* End of Header */

@@ -47,22 +47,25 @@ static void ivpu_pm_prepare_cold_boot(struct ivpu_device *vdev)
 	ivpu_ipc_reset(vdev);
 	ivpu_fw_log_reset(vdev);
 	ivpu_fw_load(vdev);
-	fw->entry_point = fw->cold_boot_entry_point;
 	fw->last_heartbeat = 0;
+
+	ivpu_dbg(vdev, FW_BOOT, "Cold boot entry point 0x%llx", vdev->fw->cold_boot_entry_point);
+	fw->next_boot_mode = VPU_BOOT_TYPE_COLDBOOT;
 }
 
 static void ivpu_pm_prepare_warm_boot(struct ivpu_device *vdev)
 {
 	struct ivpu_fw_info *fw = vdev->fw;
-	struct vpu_boot_params *bp = ivpu_bo_vaddr(fw->mem);
+	struct vpu_boot_params *bp = ivpu_bo_vaddr(fw->mem_bp);
 
-	if (!bp->save_restore_ret_address) {
+	fw->warm_boot_entry_point = bp->save_restore_ret_address;
+	if (!fw->warm_boot_entry_point) {
 		ivpu_pm_prepare_cold_boot(vdev);
 		return;
 	}
 
-	ivpu_dbg(vdev, FW_BOOT, "Save/restore entry point %llx", bp->save_restore_ret_address);
-	fw->entry_point = bp->save_restore_ret_address;
+	ivpu_dbg(vdev, FW_BOOT, "Warm boot entry point 0x%llx", fw->warm_boot_entry_point);
+	fw->next_boot_mode = VPU_BOOT_TYPE_WARMBOOT;
 }
 
 static int ivpu_suspend(struct ivpu_device *vdev)
@@ -110,7 +113,7 @@ err_power_down:
 	ivpu_hw_power_down(vdev);
 	pci_set_power_state(to_pci_dev(vdev->drm.dev), PCI_D3hot);
 
-	if (!ivpu_fw_is_cold_boot(vdev)) {
+	if (ivpu_fw_is_warm_boot(vdev)) {
 		ivpu_pm_prepare_cold_boot(vdev);
 		goto retry;
 	} else {
@@ -359,7 +362,6 @@ int ivpu_rpm_get(struct ivpu_device *vdev)
 
 void ivpu_rpm_put(struct ivpu_device *vdev)
 {
-	pm_runtime_mark_last_busy(vdev->drm.dev);
 	pm_runtime_put_autosuspend(vdev->drm.dev);
 }
 
@@ -428,7 +430,6 @@ void ivpu_pm_enable(struct ivpu_device *vdev)
 	struct device *dev = vdev->drm.dev;
 
 	pm_runtime_allow(dev);
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 }
 
@@ -502,6 +503,11 @@ void ivpu_pm_irq_dct_work_fn(struct work_struct *work)
 	else
 		ret = ivpu_pm_dct_disable(vdev);
 
-	if (!ret)
-		ivpu_hw_btrs_dct_set_status(vdev, enable, vdev->pm->dct_active_percent);
+	if (!ret) {
+		/* Convert percent to U1.7 format */
+		u8 val = DIV_ROUND_CLOSEST(vdev->pm->dct_active_percent * 128, 100);
+
+		ivpu_hw_btrs_dct_set_status(vdev, enable, val);
+	}
+
 }

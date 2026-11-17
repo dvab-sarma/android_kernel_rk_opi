@@ -1740,7 +1740,7 @@ static void sci_dma_check_tx_occurred(struct sci_port *s)
 	struct dma_tx_state state;
 	enum dma_status status;
 
-	if (!s->chan_tx)
+	if (!s->chan_tx || s->cookie_tx <= 0)
 		return;
 
 	status = dmaengine_tx_status(s->chan_tx, s->cookie_tx, &state);
@@ -2845,7 +2845,7 @@ int sci_request_port(struct uart_port *port)
 
 	ret = sci_remap_port(port);
 	if (unlikely(ret != 0)) {
-		release_resource(res);
+		release_mem_region(port->mapbase, sport->reg_size);
 		return ret;
 	}
 

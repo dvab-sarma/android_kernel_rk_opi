@@ -97,12 +97,14 @@ static inline struct dentry *binderfs_create_file(struct dentry *dir,
 #endif
 
 #ifdef CONFIG_ANDROID_BINDERFS
-extern int __init init_binderfs(void);
+int __init init_binderfs(void);
+void unload_binderfs(void);
 #else
 static inline int __init init_binderfs(void)
 {
 	return 0;
 }
+static inline void unload_binderfs(void) { }
 #endif
 
 struct binder_debugfs_entry {
@@ -161,6 +163,8 @@ struct binder_work {
 		BINDER_WORK_FROZEN_BINDER,
 		BINDER_WORK_CLEAR_FREEZE_NOTIFICATION,
 	} type;
+
+	ANDROID_OEM_DATA(1);
 };
 
 struct binder_error {
@@ -344,8 +348,8 @@ struct binder_ref {
 
 /**
  * struct binder_priority - scheduler policy and priority
- * @sched_policy            scheduler policy
- * @prio                    [100..139] for SCHED_NORMAL, [0..99] for FIFO/RT
+ * @sched_policy:           scheduler policy
+ * @prio:                   [100..139] for SCHED_NORMAL, [0..99] for FIFO/RT
  *
  * The binder driver supports inheriting the following scheduler policies:
  * SCHED_NORMAL
@@ -477,6 +481,7 @@ struct binder_proc {
 	spinlock_t outer_lock;
 	struct dentry *binderfs_entry;
 	bool oneway_spam_detection_enabled;
+	ANDROID_OEM_DATA(1);
 };
 
 /**
@@ -545,6 +550,7 @@ struct binder_thread {
 	spinlock_t prio_lock;
 	struct binder_priority prio_next;
 	enum binder_prio_state prio_state;
+	ANDROID_OEM_DATA(1);
 };
 
 /**
@@ -598,6 +604,7 @@ struct binder_transaction {
 	 */
 	spinlock_t lock;
 	ANDROID_VENDOR_DATA(1);
+	ANDROID_OEM_DATA(1);
 };
 
 /**

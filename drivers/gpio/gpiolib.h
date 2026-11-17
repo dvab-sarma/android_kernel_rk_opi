@@ -19,6 +19,7 @@
 #include <linux/spinlock.h>
 #include <linux/srcu.h>
 #include <linux/workqueue.h>
+#include <linux/android_kabi.h>
 
 #define GPIOCHIP_NAME	"gpiochip"
 
@@ -89,6 +90,7 @@ struct gpio_device {
 	 */
 	struct list_head pin_ranges;
 #endif
+	ANDROID_KABI_RESERVE(1);
 };
 
 static inline struct gpio_device *to_gpio_device(struct device *dev)
@@ -132,6 +134,7 @@ struct gpio_array {
 	struct gpio_device	*gdev;
 	unsigned long		*get_mask;
 	unsigned long		*set_mask;
+	ANDROID_KABI_RESERVE(1);
 	unsigned long		invert_mask[];
 };
 
@@ -216,6 +219,7 @@ struct gpio_desc {
 	/* debounce period in microseconds */
 	unsigned int		debounce_period_us;
 #endif
+	ANDROID_KABI_RESERVE(1);
 };
 
 #define gpiod_not_found(desc)		(IS_ERR(desc) && PTR_ERR(desc) == -ENOENT)
@@ -276,7 +280,7 @@ const char *gpiod_get_label(struct gpio_desc *desc);
 /*
  * Return the GPIO number of the passed descriptor relative to its chip
  */
-static inline int gpio_chip_hwgpio(const struct gpio_desc *desc)
+static inline int gpiod_hwgpio(const struct gpio_desc *desc)
 {
 	return desc - &desc->gdev->descs[0];
 }
@@ -309,13 +313,13 @@ do { \
 
 /* With chip prefix */
 
-#define chip_err(gc, fmt, ...)					\
+#define gpiochip_err(gc, fmt, ...) \
 	dev_err(&gc->gpiodev->dev, "(%s): " fmt, gc->label, ##__VA_ARGS__)
-#define chip_warn(gc, fmt, ...)					\
+#define gpiochip_warn(gc, fmt, ...) \
 	dev_warn(&gc->gpiodev->dev, "(%s): " fmt, gc->label, ##__VA_ARGS__)
-#define chip_info(gc, fmt, ...)					\
+#define gpiochip_info(gc, fmt, ...) \
 	dev_info(&gc->gpiodev->dev, "(%s): " fmt, gc->label, ##__VA_ARGS__)
-#define chip_dbg(gc, fmt, ...)					\
+#define gpiochip_dbg(gc, fmt, ...) \
 	dev_dbg(&gc->gpiodev->dev, "(%s): " fmt, gc->label, ##__VA_ARGS__)
 
 #endif /* GPIOLIB_H */

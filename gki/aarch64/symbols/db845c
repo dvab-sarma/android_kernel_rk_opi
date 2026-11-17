@@ -155,6 +155,7 @@
   devm_gpiochip_add_data_with_key
   devm_gpiod_get
   devm_gpiod_get_optional
+  devm_hwmon_device_register_with_groups
   devm_ioremap
   devm_ioremap_resource
   devm_ioremap_wc
@@ -204,7 +205,7 @@
   devm_snd_soc_register_card
   devm_snd_soc_register_component
   __devm_spi_alloc_controller
-  devm_spi_register_controller
+  devm_thermal_add_hwmon_sysfs
   devm_thermal_of_zone_register
   devm_watchdog_register_device
   _dev_notice
@@ -232,9 +233,9 @@
   _dev_warn
   disable_irq
   disable_irq_nosync
+  divider_determine_rate
   divider_get_val
   divider_recalc_rate
-  divider_round_rate_parent
   dma_alloc_attrs
   dma_async_device_register
   dma_async_tx_descriptor_init
@@ -420,7 +421,7 @@
   iommu_paging_domain_alloc_flags
   iommu_unmap
   __ioread32_copy
-  ioremap_prot
+  __ioremap_prot
   iounmap
   iov_iter_revert
   __iowrite32_copy_full
@@ -500,6 +501,7 @@
   mbox_free_channel
   mbox_request_channel
   mbox_send_message
+  mem_alloc_profiling_key
   memcpy
   memcpy_and_pad
   memcpy_fromio
@@ -528,6 +530,7 @@
   module_put
   __msecs_to_jiffies
   msleep
+  mtree_load
   __mutex_init
   mutex_is_locked
   mutex_lock
@@ -585,6 +588,7 @@
   of_irq_find_parent
   of_irq_get
   of_irq_get_byname
+  of_machine_compatible_match
   of_match_device
   of_match_node
   of_node_name_eq
@@ -871,6 +875,8 @@
   spi_controller_resume
   spi_controller_suspend
   spi_finalize_current_transfer
+  spi_register_controller
+  spi_unregister_controller
   sprintf
   sscanf
   __stack_chk_fail
@@ -969,6 +975,7 @@
   ww_mutex_lock_interruptible
   ww_mutex_unlock
   __xa_alloc
+  xa_destroy
   xa_erase
   xa_find
   xa_find_after
@@ -1121,7 +1128,7 @@
   __clk_is_enabled
   __clk_mux_determine_rate_closest
   devm_pm_domain_attach_list
-  divider_ro_round_rate_parent
+  divider_ro_determine_rate
   pm_genpd_remove_subdomain
 
 # required by clk-rpmh.ko
@@ -1269,7 +1276,6 @@
   dma_resv_iter_next
   drm_syncobj_find_fence
   kmem_cache_alloc_noprof
-  xa_destroy
 
 # required by i2c-designware-core.ko
   devm_pinctrl_get
@@ -1698,7 +1704,6 @@
   of_graph_get_next_endpoint
   of_graph_get_remote_port_parent
   of_icc_get
-  of_machine_compatible_match
   of_property_read_u64_index
   param_ops_ullong
   phy_configure
@@ -2133,18 +2138,18 @@
   sdhci_setup_host
 
 # required by slim-qcom-ngd-ctrl.ko
-  driver_set_override
+  __device_set_driver_override
   platform_device_add
   platform_device_alloc
+  platform_device_del
   wait_for_completion_interruptible_timeout
 
 # required by slimbus.ko
   device_find_child
 
 # required by smem.ko
+  devm_hwspin_lock_request_specific
   hwspin_lock_bust
-  hwspin_lock_free
-  hwspin_lock_request_specific
   __hwspin_lock_timeout
   __hwspin_unlock
   of_hwspin_lock_get_id
@@ -2181,7 +2186,6 @@
   snd_pcm_stop_xrun
 
 # required by snd-soc-lpass-va-macro.ko
-  clk_hw_get_clk
   regcache_sync_region
   snd_soc_dapm_regulator_event
 
@@ -2230,6 +2234,9 @@
 # required by snd-soc-wsa881x.ko
   gpiod_is_active_low
 
+# required by snd-soc-wsa884x.ko
+  devm_hwmon_device_register_with_info
+
 # required by socinfo.ko
   add_device_randomness
   soc_device_register
@@ -2251,6 +2258,7 @@
   of_property_read_variable_u16_array
 
 # required by spi-geni-qcom.ko
+  devm_spi_register_controller
   geni_se_clk_freq_match
   geni_se_rx_init_dma
   geni_se_tx_init_dma
@@ -2267,8 +2275,6 @@
   dmam_pool_create
   icc_disable
   icc_enable
-  spi_register_controller
-  spi_unregister_controller
 
 # required by spi-qup.ko
   cache_line_size
@@ -2309,6 +2315,8 @@
   msi_domain_get_virq
   platform_device_msi_free_irqs_all
   platform_device_msi_init_and_alloc_irqs
+  ufshcd_apply_tx_eq_settings
+  ufshcd_change_power_mode
   ufshcd_disable_irq
   ufshcd_dme_configure_adapt
   ufshcd_dme_get_attr
@@ -2338,6 +2346,7 @@
   ufshcd_system_resume
   ufshcd_system_suspend
   ufshcd_system_thaw
+  ufshcd_uic_change_pwr_mode
   ufshcd_uic_hibern8_enter
   ufshcd_uic_hibern8_exit
 
@@ -2358,3 +2367,6 @@
   pci_write_config_byte
   xhci_pci_common_probe
   xhci_pci_remove
+
+# preserved by --additions-only
+  driver_set_override

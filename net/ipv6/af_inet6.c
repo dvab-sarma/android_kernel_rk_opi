@@ -68,6 +68,9 @@
 
 #include <linux/uaccess.h>
 #include <linux/mroute6.h>
+#include <trace/hooks/net.h>
+
+#include <trace/hooks/net.h>
 
 #include "ip6_offload.h"
 
@@ -122,7 +125,7 @@ static int inet6_create(struct net *net, struct socket *sock, int protocol,
 {
 	struct inet_sock *inet;
 	struct ipv6_pinfo *np;
-	struct sock *sk;
+	struct sock *sk = NULL;
 	struct inet_protosw *answer;
 	struct proto *answer_prot;
 	unsigned char answer_flags;
@@ -224,8 +227,8 @@ lookup_protocol:
 	inet6_set_bit(MC6_LOOP, sk);
 	inet6_set_bit(MC6_ALL, sk);
 	np->pmtudisc	= IPV6_PMTUDISC_WANT;
-	inet6_assign_bit(REPFLOW, sk, net->ipv6.sysctl.flowlabel_reflect &
-				     FLOWLABEL_REFLECT_ESTABLISHED);
+	inet6_assign_bit(REPFLOW, sk, READ_ONCE(net->ipv6.sysctl.flowlabel_reflect) &
+				      FLOWLABEL_REFLECT_ESTABLISHED);
 	sk->sk_ipv6only	= net->ipv6.sysctl.bindv6only;
 	sk->sk_txrehash = READ_ONCE(net->core.sysctl_txrehash);
 
@@ -266,7 +269,11 @@ lookup_protocol:
 		if (err)
 			goto out_sk_release;
 	}
+
+	trace_android_rvh_inet_sock_create(sk);
+
 out:
+	trace_android_vh_inet_create(sk, err);
 	return err;
 out_rcu_unlock:
 	rcu_read_unlock();
@@ -955,7 +962,7 @@ static int __net_init inet6_net_init(struct net *net)
 	int err = 0;
 
 	net->ipv6.sysctl.bindv6only = 0;
-	net->ipv6.sysctl.icmpv6_time = 1*HZ;
+	net->ipv6.sysctl.icmpv6_time = HZ / 10;
 	net->ipv6.sysctl.icmpv6_echo_ignore_all = 0;
 	net->ipv6.sysctl.icmpv6_echo_ignore_multicast = 0;
 	net->ipv6.sysctl.icmpv6_echo_ignore_anycast = 0;

@@ -688,12 +688,14 @@ struct dm_table *dm_get_live_table(struct mapped_device *md,
 
 	return srcu_dereference(md->map, &md->io_barrier);
 }
+EXPORT_SYMBOL_GPL(dm_get_live_table);
 
 void dm_put_live_table(struct mapped_device *md,
 		       int srcu_idx) __releases(md->io_barrier)
 {
 	srcu_read_unlock(&md->io_barrier, srcu_idx);
 }
+EXPORT_SYMBOL_GPL(dm_put_live_table);
 
 void dm_sync_table(struct mapped_device *md)
 {
@@ -1363,6 +1365,8 @@ void dm_submit_bio_remap(struct bio *clone, struct bio *tgt_clone)
 	if (!tgt_clone)
 		tgt_clone = clone;
 
+	bio_clone_blkg_association(tgt_clone, io->orig_bio);
+
 	/*
 	 * Account io->origin_bio to DM dev on behalf of target
 	 * that took ownership of IO with DM_MAPIO_SUBMITTED.
@@ -1802,9 +1806,8 @@ static inline bool dm_zone_bio_needs_split(struct bio *bio)
 
 static inline bool dm_zone_plug_bio(struct mapped_device *md, struct bio *bio)
 {
-	if (!bio_needs_zone_write_plugging(bio))
-		return false;
-	return blk_zone_plug_bio(bio, 0);
+	return bio_needs_zone_write_plugging(bio) &&
+		blk_zone_plug_bio(bio, 0, -1);
 }
 
 static blk_status_t __send_zone_reset_all_emulated(struct clone_info *ci,
@@ -2361,7 +2364,8 @@ static struct mapped_device *alloc_dev(int minor)
 
 	format_dev_t(md->name, MKDEV(_major, minor));
 
-	md->wq = alloc_workqueue("kdmflush/%s", WQ_MEM_RECLAIM, 0, md->name);
+	md->wq = alloc_workqueue("kdmflush/%s", WQ_MEM_RECLAIM | WQ_PERCPU, 0,
+				 md->name);
 	if (!md->wq)
 		goto bad;
 

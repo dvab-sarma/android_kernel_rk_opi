@@ -161,7 +161,7 @@ bool parse_hwmon_filename(const char *filename,
 			  bool *alarm)
 {
 	char fn_type[24];
-	const char **elem;
+	const char * const *elem;
 	const char *fn_item = NULL;
 	size_t fn_item_len;
 
@@ -742,8 +742,7 @@ int perf_pmus__read_hwmon_pmus(struct list_head *pmus)
 			continue;
 		}
 		io__init(&io, name_fd, buf2, sizeof(buf2));
-		io__getline(&io, &line, &line_len);
-		if (line_len > 0 && line[line_len - 1] == '\n')
+		if (io__getline(&io, &line, &line_len) > 0 && line[line_len - 1] == '\n')
 			line[line_len - 1] = '\0';
 		hwmon_pmu__new(pmus, buf, class_hwmon_ent->d_name, line);
 		close(name_fd);

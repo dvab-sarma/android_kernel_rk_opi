@@ -8,6 +8,7 @@
 #include <linux/pm.h>
 #include <linux/mm.h>
 #include <linux/freezer.h>
+#include <linux/android_kabi.h>
 #include <asm/errno.h>
 
 #ifdef CONFIG_VT
@@ -185,6 +186,8 @@ struct platform_suspend_ops {
 	bool (*suspend_again)(void);
 	void (*end)(void);
 	void (*recover)(void);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct platform_s2idle_ops {
@@ -196,6 +199,8 @@ struct platform_s2idle_ops {
 	void (*restore_early)(void);
 	void (*restore)(void);
 	void (*end)(void);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 #ifdef CONFIG_SUSPEND
@@ -432,6 +437,8 @@ struct platform_hibernation_ops {
 	int (*pre_restore)(void);
 	void (*restore_cleanup)(void);
 	void (*recover)(void);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 #ifdef CONFIG_HIBERNATION
@@ -530,6 +537,7 @@ extern void pm_system_wakeup(void);
 extern void pm_system_cancel_wakeup(void);
 extern void pm_wakeup_clear(unsigned int irq_number);
 extern void pm_system_irq_wakeup(unsigned int irq_number);
+extern void pm_print_wakeup_irq(void);
 extern unsigned int pm_wakeup_irq(void);
 extern bool pm_get_wakeup_count(unsigned int *count, bool block);
 extern bool pm_save_wakeup_count(unsigned int count);
@@ -568,8 +576,9 @@ static inline void ksys_sync_helper(void) {}
 static inline bool pm_suspended_storage(void) { return false; }
 static inline bool pm_wakeup_pending(void) { return false; }
 static inline void pm_system_wakeup(void) {}
-static inline void pm_wakeup_clear(bool reset) {}
+static inline void pm_wakeup_clear(unsigned int irq_number) {}
 static inline void pm_system_irq_wakeup(unsigned int irq_number) {}
+static inline void pm_print_wakeup_irq(void) {}
 
 static inline unsigned int lock_system_sleep(void) { return 0; }
 static inline void unlock_system_sleep(unsigned int flags) {}

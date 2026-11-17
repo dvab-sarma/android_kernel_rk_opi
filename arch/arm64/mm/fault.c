@@ -26,6 +26,7 @@
 #include <linux/pkeys.h>
 #include <linux/preempt.h>
 #include <linux/hugetlb.h>
+#include <linux/gfp_types.h>
 
 #include <asm/acpi.h>
 #include <asm/bug.h>
@@ -44,6 +45,8 @@
 #include <asm/tlbflush.h>
 #include <asm/traps.h>
 #include <asm/virt.h>
+#include <trace/hooks/fault.h>
+
 #include <trace/hooks/fault.h>
 
 struct fault_info {
@@ -578,6 +581,8 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
 	struct vm_area_struct *vma;
 	int si_code;
 	int pkey = -1;
+	bool bypass = false;
+	bool vma_retry = false;
 
 	if (kprobe_page_fault(regs, esr))
 		return 0;
@@ -643,9 +648,11 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
 
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
 
-	if (!(mm_flags & FAULT_FLAG_USER))
+	trace_android_vh_arm64_user_fault_lock_vma(addr, mm_flags, &bypass);
+	if (!(mm_flags & FAULT_FLAG_USER) && !bypass)
 		goto lock_mmap;
 
+lock_vma:
 	vma = lock_vma_under_rcu(mm, addr);
 	if (!vma)
 		goto lock_mmap;
@@ -692,6 +699,11 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
 			goto no_context;
 		return 0;
 	}
+
+	trace_android_vh_arm64_do_page_fault_retry_vma_lock(&vma_retry);
+	if (vma_retry)
+		goto lock_vma;
+
 lock_mmap:
 
 retry:
@@ -862,6 +874,7 @@ static int do_sea(unsigned long far, unsigned long esr, struct pt_regs *regs)
 		siaddr  = untagged_addr(far);
 	}
 	add_taint(TAINT_MACHINE_CHECK, LOCKDEP_STILL_OK);
+	trace_android_rvh_do_sea(siaddr, esr, regs);
 	arm64_notify_die(inf->name, regs, inf->sig, inf->code, siaddr, esr);
 
 	return 0;
@@ -985,7 +998,7 @@ NOKPROBE_SYMBOL(do_sp_pc_abort);
 struct folio *vma_alloc_zeroed_movable_folio(struct vm_area_struct *vma,
 						unsigned long vaddr)
 {
-	gfp_t flags = GFP_HIGHUSER_MOVABLE | __GFP_ZERO;
+	gfp_t flags = GFP_HIGHUSER_MOVABLE | __GFP_ZERO | __GFP_CMA;
 
 	/*
 	 * If the page is mapped with PROT_MTE, initialise the tags at the
@@ -998,7 +1011,7 @@ struct folio *vma_alloc_zeroed_movable_folio(struct vm_area_struct *vma,
 	return vma_alloc_folio(flags, 0, vma, vaddr);
 }
 
-bool tag_clear_highpages(struct page *page, int numpages)
+bool tag_clear_highpages(struct page *page, int numpages, bool clear_pages)
 {
 	/*
 	 * Check if MTE is supported and fall back to clear_highpage().
@@ -1006,13 +1019,16 @@ bool tag_clear_highpages(struct page *page, int numpages)
 	 * post_alloc_hook() will invoke tag_clear_highpages().
 	 */
 	if (!system_supports_mte())
-		return false;
+		return clear_pages;
 
 	/* Newly allocated pages, shouldn't have been tagged yet */
 	for (int i = 0; i < numpages; i++, page++) {
 		WARN_ON_ONCE(!try_page_mte_tagging(page));
-		mte_zero_clear_page_tags(page_address(page));
+		if (clear_pages)
+			mte_zero_clear_page_tags(page_address(page));
+		else
+			mte_clear_page_tags(page_address(page));
 		set_page_mte_tagged(page);
 	}
-	return true;
+	return false;
 }
