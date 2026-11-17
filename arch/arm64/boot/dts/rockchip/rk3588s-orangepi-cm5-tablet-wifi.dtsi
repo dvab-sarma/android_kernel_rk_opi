@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* AP6256 SDIO wiring and 32 kHz source from the Android 13 CM5 tablet DTS. */
+/ {
+    sdio_pwrseq: sdio-pwrseq {
+        compatible = "mmc-pwrseq-simple";
+        clocks = <&hym8563>;
+        clock-names = "ext_clock";
+        pinctrl-names = "default";
+        pinctrl-0 = <&wifi_enable_h>;
+        reset-gpios = <&gpio0 RK_PD0 GPIO_ACTIVE_LOW>;
+        post-power-on-delay-ms = <200>;
+    };
+};
+
+
+
+&sdio {
+    max-frequency = <150000000>;
+    no-sd;
+    no-mmc;
+    bus-width = <4>;
+    disable-wp;
+    cap-sd-highspeed;
+    cap-sdio-irq;
+    keep-power-in-suspend;
+    mmc-pwrseq = <&sdio_pwrseq>;
+    non-removable;
+    pinctrl-names = "default";
+    pinctrl-0 = <&sdiom1_pins>;
+    sd-uhs-sdr104;
+    #address-cells = <1>;
+    #size-cells = <0>;
+    status = "okay";
+    wifi@1 {
+        compatible = "brcm,bcm43456-fmac", "brcm,bcm4329-fmac";
+        reg = <1>;
+        pinctrl-names = "default";
+        pinctrl-0 = <&wifi_host_wake_irq>;
+        interrupt-parent = <&gpio0>;
+        interrupts = <RK_PA0 IRQ_TYPE_LEVEL_HIGH>;
+        interrupt-names = "host-wake";
+        brcm,board-type = "xunlong,orangepi-cm5-tablet";
+    };
+};
+
+&pinctrl {
+    sdio-pwrseq {
+        wifi_enable_h: wifi-enable-h {
+            rockchip,pins = <0 RK_PD0 RK_FUNC_GPIO &pcfg_pull_none>;
+        };
+    };
+    wireless-wlan {
+        wifi_host_wake_irq: wifi-host-wake-irq {
+            rockchip,pins = <0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_down>;
+        };
+    };
+
+};
+

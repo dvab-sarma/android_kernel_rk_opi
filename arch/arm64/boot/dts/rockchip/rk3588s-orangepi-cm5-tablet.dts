@@ -633,7 +633,7 @@
  * Optional CM5 AP6256 SDIO Wi-Fi wiring.
  * Uses the RTC clock declared by the base board.
  */
-// CM5_WIFI_INCLUDE
+#include "rk3588s-orangepi-cm5-tablet-wifi.dtsi"
 
 /*
  * Optional CM5 AP6256 UART Bluetooth wiring.
