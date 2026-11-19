@@ -31,6 +31,8 @@ enum guest_commands {
 #define  PC(v)  ((uint64_t)&(v))
 
 #define GUEST_ASSERT_REG_RAZ(reg)	GUEST_ASSERT_EQ(read_sysreg_s(reg), 0)
+#define GUEST_ASSERT_REG_MASKED(reg, mask) \
+	GUEST_ASSERT_EQ(read_sysreg_s(reg) & ~(uint64_t)(mask), 0)
 
 /* KVM UID value: 28b46fb6-2ec5-11e9-a9ca-4b564d003a74 */
 #define ARM_SMCCC_VENDOR_HYP_UID_KVM_REG_0	0xb66fb428U
@@ -328,6 +330,7 @@ static void test_feature_id_regs(void)
 	GUEST_ASSERT_REG_RAZ(SYS_ID_DFR1_EL1);
 	GUEST_ASSERT_REG_RAZ(SYS_ID_MMFR5_EL1);
 	GUEST_ASSERT_REG_RAZ(sys_reg(3, 0, 0, 3, 7));
+	GUEST_ASSERT_REG_MASKED(SYS_ID_AA64PFR2_EL1, ID_AA64PFR2_EL1_FPMR);
 }
 
 static void reset_handler_globals(void)
@@ -438,6 +441,67 @@ static void test_restricted_debug(void)
 	GUEST_SYNC(CMD_HEARTBEAT);
 }
 
+static void test_s1pie_s1poe(void)
+{
+	uint64_t mmfr3 = read_sysreg_s(SYS_ID_AA64MMFR3_EL1);
+	uint64_t s1pie = (mmfr3 >> 8) & 0xf;
+	uint64_t s1poe = (mmfr3 >> 16) & 0xf;
+	uint64_t pir, pire0, por_el1, por_el0;
+
+	/* If features are supported, ensure registers don't trap. */
+	if (s1pie) {
+		GUEST_PRINTF("s1pie enabled\n");
+
+		pir = read_sysreg_s(SYS_PIR_EL1);
+		pire0 = read_sysreg_s(SYS_PIRE0_EL1);
+
+		write_sysreg_s(0xdeadbeef, SYS_PIR_EL1);
+		write_sysreg_s(0xdeadbeef, SYS_PIRE0_EL1);
+
+		GUEST_ASSERT(read_sysreg_s(SYS_PIR_EL1) == 0xdeadbeef);
+		GUEST_ASSERT(read_sysreg_s(SYS_PIRE0_EL1) == 0xdeadbeef);
+
+		write_sysreg_s(pir, SYS_PIR_EL1);
+		write_sysreg_s(pire0, SYS_PIRE0_EL1);
+	}
+
+	if (s1poe) {
+		GUEST_PRINTF("s1poe enabled\n");
+
+		por_el1 = read_sysreg_s(SYS_POR_EL1);
+		por_el0 = read_sysreg_s(SYS_POR_EL0);
+
+		write_sysreg_s(0xcafebabe, SYS_POR_EL1);
+		write_sysreg_s(0xcafebabe, SYS_POR_EL0);
+
+		GUEST_ASSERT(read_sysreg_s(SYS_POR_EL1) == 0xcafebabe);
+		GUEST_ASSERT(read_sysreg_s(SYS_POR_EL0) == 0xcafebabe);
+
+		write_sysreg_s(por_el1, SYS_POR_EL1);
+		write_sysreg_s(por_el0, SYS_POR_EL0);
+	}
+}
+
+static void test_fpmr(void)
+{
+	uint64_t pfr2 = read_sysreg_s(SYS_ID_AA64PFR2_EL1);
+	uint64_t fpmr = (pfr2 >> 32) & 0xf;
+	uint64_t saved, val;
+
+	if (!fpmr)
+		return;
+
+	GUEST_PRINTF("fpmr enabled\n");
+
+	saved = read_sysreg_s(SYS_FPMR);
+
+	write_sysreg_s((uint64_t)0x42 << 24, SYS_FPMR);
+	val = read_sysreg_s(SYS_FPMR);
+	GUEST_ASSERT_EQ(val, (uint64_t)0x42 << 24);
+
+	write_sysreg_s(saved, SYS_FPMR);
+}
+
 /*
  * Main code to run by the guest vm.
  */
@@ -475,6 +539,10 @@ static void guest_code(vm_paddr_t ucall_pool_phys, size_t ucall_pool_size,
 	test_feature_id_regs();
 
 	test_restricted_debug();
+
+	test_s1pie_s1poe();
+
+	test_fpmr();
 
 	/* Populate the donated memslot to facilitate testing poisoning after destruction. */
 	guest_dirty_memslot();
@@ -730,8 +798,6 @@ static void test_run(enum vm_mem_backing_src_type src_type)
 
 	getrusage(RUSAGE_SELF, &usage);
 	pr_info("Memory usage after teardown: %ld bytes\n", usage.ru_maxrss);
-
-	pr_info("All ok!\n");
 }
 
 int main(int argc, char *argv[])
@@ -739,14 +805,13 @@ int main(int argc, char *argv[])
 	pr_info("\n*** Testing regular pages.\n");
 	test_run(VM_MEM_SRC_ANONYMOUS);
 
-	if (!thp_configured()) {
+	if (thp_configured()) {
+		pr_info("\n*** Testing THP. This is best-effort.\n");
+		test_run(VM_MEM_SRC_ANONYMOUS_THP);
+	} else {
 		pr_info("\n*** THP is not configured. Skipping THP tests.\n");
-
-		return 0;
 	}
 
-	pr_info("\n*** Testing THP. This is best-effort.\n");
-	test_run(VM_MEM_SRC_ANONYMOUS_THP);
-
+	pr_info("All ok!\n");
 	return 0;
 }

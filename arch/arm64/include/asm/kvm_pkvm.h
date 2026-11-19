@@ -59,23 +59,45 @@ static inline bool kvm_pkvm_ext_allowed(struct kvm *kvm, long ext)
 	}
 }
 
+static inline bool __ioctl_is_smccc_filter(unsigned int ioctl, void __user *argp)
+{
+	struct kvm_device_attr attr;
+
+	switch (ioctl) {
+	case KVM_SET_DEVICE_ATTR:
+	case KVM_GET_DEVICE_ATTR:
+	case KVM_HAS_DEVICE_ATTR:
+		break;
+	default:
+		return false;
+	}
+
+	if (copy_from_user(&attr, argp, sizeof(attr)))
+		return false;
+
+	return attr.group == KVM_ARM_VM_SMCCC_CTRL &&
+	       attr.attr == KVM_ARM_VM_SMCCC_FILTER;
+}
+
 /*
  * Check whether the KVM VM IOCTL is allowed in pKVM.
  *
  * Certain features are allowed only for non-protected VMs in pKVM, which is why
  * this takes the VM (kvm) as a parameter.
  */
-static inline bool kvm_pkvm_ioctl_allowed(struct kvm *kvm, unsigned int ioctl)
+static inline bool kvm_pkvm_ioctl_allowed(struct kvm *kvm, unsigned int ioctl, void __user *argp)
 {
 	long ext;
 	int r;
 
 	r = kvm_get_cap_for_kvm_ioctl(ioctl, &ext);
-
-	if (WARN_ON_ONCE(r < 0))
+	if (r < 0)
 		return false;
 
-	return kvm_pkvm_ext_allowed(kvm, ext);
+	if (kvm_pkvm_ext_allowed(kvm, ext))
+		return true;
+
+	return __ioctl_is_smccc_filter(ioctl, argp);
 }
 
 static inline unsigned long pvm_supported_vcpu_features(struct kvm *kvm)
@@ -120,6 +142,9 @@ struct pkvm_moveable_reg {
 #define PKVM_NR_MOVEABLE_REGS 512
 extern struct pkvm_moveable_reg kvm_nvhe_sym(pkvm_moveable_regs)[];
 extern unsigned int kvm_nvhe_sym(pkvm_moveable_regs_nr);
+
+extern phys_addr_t kvm_nvhe_sym(host_s2_cma_base);
+extern phys_addr_t kvm_nvhe_sym(host_s2_cma_size);
 
 extern struct memblock_region kvm_nvhe_sym(hyp_memory)[];
 extern unsigned int kvm_nvhe_sym(hyp_memblock_nr);
@@ -204,21 +229,20 @@ static inline unsigned long hyp_s1_pgtable_pages(void)
 
 static inline unsigned long host_s2_pgtable_pages(void)
 {
-	unsigned long res;
-
 	/*
 	 * Include an extra 16 pages to safely upper-bound the worst case of
 	 * concatenated pgds.
 	 */
-	res = __hyp_pgtable_moveable_regs_pages() + 16;
-
-	/* Allow 1 GiB for non-moveable regions */
-	res += __hyp_pgtable_max_pages(SZ_1G >> PAGE_SHIFT);
-
-	return res;
+	return __hyp_pgtable_moveable_regs_pages() + 16;
 }
 
-#ifdef CONFIG_NVHE_EL2_DEBUG
+static inline unsigned long host_s2_mmio_pgtable_pages(void)
+{
+	/* Allow 1 GiB for non-moveable regions */
+	return __hyp_pgtable_max_pages(SZ_1G >> PAGE_SHIFT);
+}
+
+#ifdef CONFIG_PKVM_SELFTESTS
 static inline unsigned long pkvm_selftest_pages(void) { return 32; }
 #else
 static inline unsigned long pkvm_selftest_pages(void) { return 0; }
@@ -230,10 +254,24 @@ static inline unsigned long pkvm_selftest_pages(void) { return 0; }
 #define KVM_FFA_SPM_HANDLE_NR_PAGES	2
 
 /*
- * Maximum number of consitutents allowed in a descriptor. This number is
- * arbitrary, see comment below on SG_MAX_SEGMENTS in hyp_ffa_proxy_pages().
+ * Maximum number of constituents allowed in a descriptor. This number is
+ * arbitrary, and can be overridden via command line kvm-arm.ffa_max_nr_constituents.
+ * See comment below on SG_MAX_SEGMENTS in hyp_ffa_proxy_pages().
  */
 #define KVM_FFA_MAX_NR_CONSTITUENTS	4096
+extern size_t kvm_nvhe_sym(ffa_max_nr_constituents);
+
+enum pkvm_ffa_unmap_on_lend_mode {
+	PKVM_FFA_UNMAP_ON_LEND_OFF = 0,
+	PKVM_FFA_UNMAP_ON_LEND_ON,
+	PKVM_FFA_UNMAP_ON_LEND_FULL,
+};
+
+extern int kvm_nvhe_sym(__pkvm_ffa_unmap_on_lend);
+static inline bool pkvm_ffa_unmap_on_lend(void)
+{
+	return kvm_nvhe_sym(__pkvm_ffa_unmap_on_lend);
+}
 
 static inline unsigned long hyp_ffa_proxy_pages(void)
 {
@@ -249,7 +287,7 @@ static inline unsigned long hyp_ffa_proxy_pages(void)
 	 * it is sometimes abused, so let's allow larger descriptors and hope
 	 * for the best.
 	 */
-	BUILD_BUG_ON(KVM_FFA_MAX_NR_CONSTITUENTS < SG_MAX_SEGMENTS);
+	WARN_ON(kvm_nvhe_sym(ffa_max_nr_constituents) < SG_MAX_SEGMENTS);
 
 	/*
 	 * The hypervisor FFA proxy needs enough memory to buffer a fragmented
@@ -258,10 +296,13 @@ static inline unsigned long hyp_ffa_proxy_pages(void)
 	desc_max = sizeof(struct ffa_mem_region) +
 		   sizeof(struct ffa_mem_region_attributes) +
 		   sizeof(struct ffa_composite_mem_region) +
-		   KVM_FFA_MAX_NR_CONSTITUENTS * sizeof(struct ffa_mem_region_addr_range);
+		   kvm_nvhe_sym(ffa_max_nr_constituents) * sizeof(struct ffa_mem_region_addr_range);
 
 	/* Plus a page each for the hypervisor's RX and TX mailboxes. */
 	num_pages = (2 * KVM_FFA_MBOX_NR_PAGES) + DIV_ROUND_UP(desc_max, PAGE_SIZE);
+
+	if (pkvm_ffa_unmap_on_lend())
+		num_pages += KVM_FFA_SPM_HANDLE_NR_PAGES;
 
 	return num_pages;
 }
@@ -306,7 +347,10 @@ kvm_pte_t *pkvm_pgtable_stage2_create_unlinked(struct kvm_pgtable *pgt, u64 phys
 					       enum kvm_pgtable_prot prot, void *mc,
 					       bool force_pte);
 
+int __pkvm_topup_hyp_alloc_mgt_mc(enum hyp_alloc_mgt_id id, struct kvm_hyp_memcache *mc);
 int __pkvm_topup_hyp_alloc(unsigned long nr_pages);
+
+int __pkvm_handle_smccc_req(struct arm_smccc_res *res, void *arg);
 
 #define kvm_call_refill_hyp_nvhe(f, ...)				\
 ({									\
@@ -318,16 +362,19 @@ int __pkvm_topup_hyp_alloc(unsigned long nr_pages);
 				  ##__VA_ARGS__, &res);			\
 		if (WARN_ON(res.a0 != SMCCC_RET_SUCCESS))		\
 			break;						\
-									\
 		__ret = res.a1;						\
-		if (__ret == -ENOMEM && res.a3) {			\
-			__ret = __pkvm_topup_hyp_alloc(res.a3);		\
-		} else {						\
+		if (!__ret)						\
 			break;						\
-		}							\
+		__ret = __pkvm_handle_smccc_req(&res, NULL);		\
 	} while (!__ret);						\
 	__ret;								\
 })
+
+#ifdef CONFIG_CMA
+int pkvm_host_stage2_topup(gfp_t gfp);
+#else
+static inline int pkvm_host_stage2_topup(gfp_t gfp) { return -EINVAL; }
+#endif
 
 enum pkvm_ptdump_ops {
 	PKVM_PTDUMP_GET_LEVEL,
@@ -345,6 +392,7 @@ struct pkvm_ptdump_log {
 	bool	table: 1;
 	u16	page_state: 2;
 	u16	level: 8;
+	u8	mmio_guard : 1;
 } __packed;
 
 #define INVALID_PTDUMP_PFN	(BIT(41) - 1)

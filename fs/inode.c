@@ -14,6 +14,7 @@
 #include <linux/cdev.h>
 #include <linux/memblock.h>
 #include <linux/fsnotify.h>
+#include <linux/fsverity.h>
 #include <linux/mount.h>
 #include <linux/posix_acl.h>
 #include <linux/buffer_head.h> /* for inode_has_buffers */
@@ -28,6 +29,10 @@
 #include <trace/events/timestamp.h>
 
 #include "internal.h"
+
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/vmscan.h>
+#include <trace/hooks/fs.h>
 
 /*
  * Inode locking rules:
@@ -419,7 +424,7 @@ void drop_nlink(struct inode *inode)
 	if (!inode->i_nlink)
 		atomic_long_inc(&inode->i_sb->s_remove_count);
 }
-EXPORT_SYMBOL(drop_nlink);
+EXPORT_SYMBOL_NS(drop_nlink, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  * clear_nlink - directly zero an inode's link count
@@ -458,7 +463,7 @@ void set_nlink(struct inode *inode, unsigned int nlink)
 		inode->__i_nlink = nlink;
 	}
 }
-EXPORT_SYMBOL(set_nlink);
+EXPORT_SYMBOL_NS(set_nlink, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  * inc_nlink - directly increment an inode's link count
@@ -512,7 +517,7 @@ void inode_init_once(struct inode *inode)
 	__address_space_init_once(&inode->i_data);
 	i_size_ordered_init(inode);
 }
-EXPORT_SYMBOL(inode_init_once);
+EXPORT_SYMBOL_NS(inode_init_once, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 static void init_once(void *foo)
 {
@@ -528,7 +533,7 @@ void ihold(struct inode *inode)
 {
 	WARN_ON(atomic_inc_return(&inode->i_count) < 2);
 }
-EXPORT_SYMBOL(ihold);
+EXPORT_SYMBOL_NS(ihold, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 static void __inode_add_lru(struct inode *inode, bool rotate)
 {
@@ -567,6 +572,7 @@ void inode_add_lru(struct inode *inode)
 {
 	__inode_add_lru(inode, false);
 }
+EXPORT_SYMBOL(inode_add_lru);
 
 static void inode_lru_list_del(struct inode *inode)
 {
@@ -670,7 +676,7 @@ void __insert_inode_hash(struct inode *inode, unsigned long hashval)
 	spin_unlock(&inode->i_lock);
 	spin_unlock(&inode_hash_lock);
 }
-EXPORT_SYMBOL(__insert_inode_hash);
+EXPORT_SYMBOL_NS(__insert_inode_hash, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  *	__remove_inode_hash - remove an inode from the hash
@@ -686,7 +692,7 @@ void __remove_inode_hash(struct inode *inode)
 	spin_unlock(&inode->i_lock);
 	spin_unlock(&inode_hash_lock);
 }
-EXPORT_SYMBOL(__remove_inode_hash);
+EXPORT_SYMBOL_NS(__remove_inode_hash, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 void dump_mapping(const struct address_space *mapping)
 {
@@ -745,6 +751,14 @@ void dump_mapping(const struct address_space *mapping)
 void clear_inode(struct inode *inode)
 {
 	/*
+	 * Only IS_VERITY() inodes can have verity info, so start by checking
+	 * for IS_VERITY() (which is faster than retrieving the pointer to the
+	 * verity info).  This minimizes overhead for non-verity inodes.
+	 */
+	if (IS_ENABLED(CONFIG_FS_VERITY) && IS_VERITY(inode))
+		fsverity_cleanup_inode(inode);
+
+	/*
 	 * We have to cycle the i_pages lock here because reclaim can be in the
 	 * process of removing the last page (in __filemap_remove_folio())
 	 * and we must not free the mapping under it.
@@ -767,7 +781,7 @@ void clear_inode(struct inode *inode)
 	/* don't need i_lock here, no concurrent mods to i_state */
 	inode->i_state = I_FREEING | I_CLEAR;
 }
-EXPORT_SYMBOL(clear_inode);
+EXPORT_SYMBOL_NS(clear_inode, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /*
  * Free the inode passed in, removing it from the lists it is still connected
@@ -792,6 +806,7 @@ static void evict(struct inode *inode)
 	if (!list_empty(&inode->i_io_list))
 		inode_io_list_del(inode);
 
+	trace_android_vh_evict(inode);
 	inode_sb_list_del(inode);
 
 	spin_lock(&inode->i_lock);
@@ -923,6 +938,7 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
 {
 	struct list_head *freeable = arg;
 	struct inode	*inode = container_of(item, struct inode, i_lru);
+	bool skip = false;
 
 	/*
 	 * We are inverting the lru lock/inode->i_lock here, so use a
@@ -930,6 +946,12 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
 	 */
 	if (!spin_trylock(&inode->i_lock))
 		return LRU_SKIP;
+
+	trace_android_vh_inode_lru_isolate(inode, &skip);
+	if (skip) {
+		spin_unlock(&inode->i_lock);
+		return LRU_SKIP;
+	}
 
 	/*
 	 * Inodes can get referenced, redirtied, or repopulated while
@@ -1191,7 +1213,7 @@ void unlock_new_inode(struct inode *inode)
 	inode_wake_up_bit(inode, __I_NEW);
 	spin_unlock(&inode->i_lock);
 }
-EXPORT_SYMBOL(unlock_new_inode);
+EXPORT_SYMBOL_NS(unlock_new_inode, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 void discard_new_inode(struct inode *inode)
 {
@@ -1364,7 +1386,7 @@ struct inode *iget5_locked(struct super_block *sb, unsigned long hashval,
 	}
 	return inode;
 }
-EXPORT_SYMBOL(iget5_locked);
+EXPORT_SYMBOL_NS(iget5_locked, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  * iget5_locked_rcu - obtain an inode from a mounted file system
@@ -1540,7 +1562,7 @@ ino_t iunique(struct super_block *sb, ino_t max_reserved)
 
 	return res;
 }
-EXPORT_SYMBOL(iunique);
+EXPORT_SYMBOL_NS(iunique, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 struct inode *igrab(struct inode *inode)
 {
@@ -1626,7 +1648,7 @@ again:
 	}
 	return inode;
 }
-EXPORT_SYMBOL(ilookup5);
+EXPORT_SYMBOL_NS(ilookup5, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  * ilookup - search for an inode in the inode cache
@@ -2204,7 +2226,7 @@ void touch_atime(const struct path *path)
 skip_update:
 	sb_end_write(inode->i_sb);
 }
-EXPORT_SYMBOL(touch_atime);
+EXPORT_SYMBOL_NS(touch_atime, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /*
  * Return mask of changes for notify_change() that need to be done as a
@@ -2282,7 +2304,7 @@ int file_remove_privs(struct file *file)
 {
 	return file_remove_privs_flags(file, 0);
 }
-EXPORT_SYMBOL(file_remove_privs);
+EXPORT_SYMBOL_NS(file_remove_privs, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  * current_time - Return FS time (possibly fine-grained)
@@ -2322,42 +2344,40 @@ out:
 }
 EXPORT_SYMBOL(current_time);
 
-static int inode_needs_update_time(struct inode *inode)
+static int file_update_time_flags(struct file *file, unsigned int flags)
 {
+	struct inode *inode = file_inode(file);
 	struct timespec64 now, ts;
-	int sync_it = 0;
+	int sync_mode = 0;
+	int ret = 0;
 
 	/* First try to exhaust all avenues to not sync */
 	if (IS_NOCMTIME(inode))
+		return 0;
+	if (unlikely(file->f_mode & FMODE_NOCMTIME))
 		return 0;
 
 	now = current_time(inode);
 
 	ts = inode_get_mtime(inode);
 	if (!timespec64_equal(&ts, &now))
-		sync_it |= S_MTIME;
-
+		sync_mode |= S_MTIME;
 	ts = inode_get_ctime(inode);
 	if (!timespec64_equal(&ts, &now))
-		sync_it |= S_CTIME;
-
+		sync_mode |= S_CTIME;
 	if (IS_I_VERSION(inode) && inode_iversion_need_inc(inode))
-		sync_it |= S_VERSION;
+		sync_mode |= S_VERSION;
 
-	return sync_it;
-}
+	if (!sync_mode)
+		return 0;
 
-static int __file_update_time(struct file *file, int sync_mode)
-{
-	int ret = 0;
-	struct inode *inode = file_inode(file);
+	if (flags & IOCB_NOWAIT)
+		return -EAGAIN;
 
-	/* try to update time settings */
-	if (!mnt_get_write_access_file(file)) {
-		ret = inode_update_time(inode, sync_mode);
-		mnt_put_write_access_file(file);
-	}
-
+	if (mnt_get_write_access_file(file))
+		return 0;
+	ret = inode_update_time(inode, sync_mode);
+	mnt_put_write_access_file(file);
 	return ret;
 }
 
@@ -2377,14 +2397,7 @@ static int __file_update_time(struct file *file, int sync_mode)
  */
 int file_update_time(struct file *file)
 {
-	int ret;
-	struct inode *inode = file_inode(file);
-
-	ret = inode_needs_update_time(inode);
-	if (ret <= 0)
-		return ret;
-
-	return __file_update_time(file, ret);
+	return file_update_time_flags(file, 0);
 }
 EXPORT_SYMBOL(file_update_time);
 
@@ -2406,7 +2419,6 @@ EXPORT_SYMBOL(file_update_time);
 static int file_modified_flags(struct file *file, int flags)
 {
 	int ret;
-	struct inode *inode = file_inode(file);
 
 	/*
 	 * Clear the security bits if the process is not being run by root.
@@ -2415,17 +2427,7 @@ static int file_modified_flags(struct file *file, int flags)
 	ret = file_remove_privs_flags(file, flags);
 	if (ret)
 		return ret;
-
-	if (unlikely(file->f_mode & FMODE_NOCMTIME))
-		return 0;
-
-	ret = inode_needs_update_time(inode);
-	if (ret <= 0)
-		return ret;
-	if (flags & IOCB_NOWAIT)
-		return -EAGAIN;
-
-	return __file_update_time(file, ret);
+	return file_update_time_flags(file, flags);
 }
 
 /**
@@ -2595,7 +2597,7 @@ void init_special_inode(struct inode *inode, umode_t mode, dev_t rdev)
 		break;
 	}
 }
-EXPORT_SYMBOL(init_special_inode);
+EXPORT_SYMBOL_NS(init_special_inode, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  * inode_init_owner - Init uid,gid,mode for new inode according to posix standards
@@ -2624,7 +2626,7 @@ void inode_init_owner(struct mnt_idmap *idmap, struct inode *inode,
 		inode_fsgid_set(inode, idmap);
 	inode->i_mode = mode;
 }
-EXPORT_SYMBOL(inode_init_owner);
+EXPORT_SYMBOL_NS(inode_init_owner, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  * inode_owner_or_capable - check current task permissions to inode
@@ -2680,7 +2682,7 @@ void inode_dio_wait(struct inode *inode)
 {
 	wait_var_event(&inode->i_dio_count, inode_dio_finished(inode));
 }
-EXPORT_SYMBOL(inode_dio_wait);
+EXPORT_SYMBOL_NS(inode_dio_wait, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 void inode_dio_wait_interruptible(struct inode *inode)
 {
@@ -2711,7 +2713,7 @@ void inode_set_flags(struct inode *inode, unsigned int flags,
 	WARN_ON_ONCE(flags & ~mask);
 	set_mask_bits(&inode->i_flags, mask, flags);
 }
-EXPORT_SYMBOL(inode_set_flags);
+EXPORT_SYMBOL_NS(inode_set_flags, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 void inode_nohighmem(struct inode *inode)
 {
@@ -2758,7 +2760,7 @@ struct timespec64 timestamp_truncate(struct timespec64 t, struct inode *inode)
 		WARN(1, "invalid file time granularity: %u", gran);
 	return t;
 }
-EXPORT_SYMBOL(timestamp_truncate);
+EXPORT_SYMBOL_NS(timestamp_truncate, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  * inode_set_ctime_current - set the ctime to current_time

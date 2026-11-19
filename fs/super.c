@@ -31,6 +31,7 @@
 #include <linux/mutex.h>
 #include <linux/backing-dev.h>
 #include <linux/rculist_bl.h>
+#include <linux/cleancache.h>
 #include <linux/fscrypt.h>
 #include <linux/fsnotify.h>
 #include <linux/lockdep.h>
@@ -38,6 +39,8 @@
 #include <linux/fs_context.h>
 #include <uapi/linux/mount.h>
 #include "internal.h"
+
+#include <trace/hooks/fs.h>
 
 static int thaw_super_locked(struct super_block *sb, enum freeze_holder who,
 			     const void *freeze_owner);
@@ -374,6 +377,7 @@ static struct super_block *alloc_super(struct file_system_type *type, int flags,
 	s->s_time_gran = 1000000000;
 	s->s_time_min = TIME64_MIN;
 	s->s_time_max = TIME64_MAX;
+	s->cleancache_poolid = CLEANCACHE_NO_POOL;
 
 	s->s_shrink = shrinker_alloc(SHRINKER_NUMA_AWARE | SHRINKER_MEMCG_AWARE,
 				     "sb-%s", type->name);
@@ -469,6 +473,7 @@ void deactivate_locked_super(struct super_block *s)
 {
 	struct file_system_type *fs = s->s_type;
 	if (atomic_dec_and_test(&s->s_active)) {
+		cleancache_invalidate_fs(s);
 		shrinker_free(s->s_shrink);
 		fs->kill_sb(s);
 
@@ -638,6 +643,7 @@ void generic_shutdown_super(struct super_block *sb)
 			sb->s_dio_done_wq = NULL;
 		}
 
+		trace_android_vh_put_super(sb);
 		if (sop->put_super)
 			sop->put_super(sb);
 
@@ -1188,7 +1194,7 @@ static void filesystems_freeze_callback(struct super_block *sb, void *freeze_all
 	if (!sb->s_op->freeze_fs && !sb->s_op->freeze_super)
 		return;
 
-	if (freeze_all_ptr && !(sb->s_type->fs_flags & FS_POWER_FREEZE))
+	if (!freeze_all_ptr && !(sb->s_type->fs_flags & FS_POWER_FREEZE))
 		return;
 
 	if (!get_active_super(sb))
@@ -1733,7 +1739,7 @@ void kill_block_super(struct super_block *sb)
 	}
 }
 
-EXPORT_SYMBOL(kill_block_super);
+EXPORT_SYMBOL_NS(kill_block_super, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 #endif
 
 /**

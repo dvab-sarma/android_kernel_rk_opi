@@ -4,6 +4,7 @@
 #define __LINUX_USB_TYPEC_H
 
 #include <linux/types.h>
+#include <linux/android_kabi.h>
 
 /* USB Type-C Specification releases */
 #define USB_TYPEC_REV_1_0	0x100 /* 1.0 */
@@ -20,11 +21,14 @@ struct typec_port;
 struct typec_altmode_ops;
 struct typec_cable_ops;
 
+struct bus_type;
 struct fwnode_handle;
 struct device;
 
 struct usb_power_delivery;
 struct usb_power_delivery_desc;
+
+extern const struct bus_type typec_bus;
 
 enum typec_port_type {
 	TYPEC_PORT_SRC,
@@ -152,6 +156,7 @@ struct typec_altmode_desc {
 	/* Only used with ports */
 	enum typec_port_data	roles;
 	bool			inactive;
+	bool			mode_selection;
 };
 
 void typec_partner_set_pd_revision(struct typec_partner *partner, u16 pd_revision);
@@ -269,6 +274,9 @@ struct typec_operations {
 	int (*pd_set)(struct typec_port *port, struct usb_power_delivery *pd);
 	int (*default_usb_mode_set)(struct typec_port *port, enum usb_mode mode);
 	int (*enter_usb_mode)(struct typec_port *port, enum usb_mode mode);
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 enum usb_pd_svdm_ver {
@@ -287,6 +295,7 @@ enum usb_pd_svdm_ver {
  * @prefer_role: Initial role preference (DRP ports).
  * @accessory: Supported Accessory Modes
  * @usb_capability: Supported USB Modes
+ * @no_mode_control: Ability to manage Alternate Modes
  * @fwnode: Optional fwnode of the port
  * @driver_data: Private pointer for driver specific info
  * @pd: Optional USB Power Delivery Support
@@ -304,6 +313,7 @@ struct typec_capability {
 	enum typec_accessory	accessory[TYPEC_MAX_ACCESSORY];
 	unsigned int		orientation_aware:1;
 	u8			usb_capability;
+	bool			no_mode_control;
 
 	struct fwnode_handle	*fwnode;
 	void			*driver_data;
@@ -311,6 +321,9 @@ struct typec_capability {
 	struct usb_power_delivery *pd;
 
 	const struct typec_operations	*ops;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 /* Specific to try_role(). Indicates the user want's to clear the preference. */
@@ -331,6 +344,7 @@ void typec_unregister_cable(struct typec_cable *cable);
 struct typec_cable *typec_cable_get(struct typec_port *port);
 void typec_cable_put(struct typec_cable *cable);
 int typec_cable_is_active(struct typec_cable *cable);
+bool typec_cable_altmode_unsupported(struct typec_altmode *alt);
 
 struct typec_plug *typec_register_plug(struct typec_cable *cable,
 				       struct typec_plug_desc *desc);

@@ -37,10 +37,10 @@ static const struct address_space_operations swap_aops = {
 #endif
 };
 
-/* Set swap_space as read only as swap cache is handled by swap table */
-struct address_space swap_space __ro_after_init = {
+struct address_space swap_space __read_mostly = {
 	.a_ops = &swap_aops,
 };
+EXPORT_SYMBOL_GPL(swap_space);
 
 static bool enable_vma_readahead __read_mostly = true;
 
@@ -234,6 +234,7 @@ void swap_cache_del_folio(struct folio *folio)
 	put_swap_folio(folio, entry);
 	folio_ref_sub(folio, folio_nr_pages(folio));
 }
+EXPORT_SYMBOL_GPL(swap_cache_del_folio);
 
 /**
  * __swap_cache_replace_folio - Replace a folio in the swap cache.
@@ -347,6 +348,7 @@ void free_pages_and_swap_cache(struct encoded_page **pages, int nr)
 
 		free_swap_cache(folio);
 		refs[folios.nr] = 1;
+		trace_android_vh_free_pages_and_swap_cache(folio);
 		if (unlikely(encoded_page_flags(pages[i]) &
 			     ENCODED_PAGE_BIT_NR_PAGES_NEXT))
 			refs[folios.nr] = encoded_nr_pages(pages[++i]);
@@ -411,11 +413,12 @@ struct folio *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 	struct folio *new_folio = NULL;
 	struct folio *result = NULL;
 	void *shadow = NULL;
+	size_t count = 0;
 
 	*new_page_allocated = false;
 	for (;;) {
 		int err;
-
+		bool skip = false;
 		/*
 		 * Check the swap cache first, if a cached folio is found,
 		 * return it unlocked. The caller will lock and check it.
@@ -469,6 +472,10 @@ struct folio *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		 * __read_swap_cache_async(), which has set SWAP_HAS_CACHE
 		 * in swap_map, but not yet added its folio to swap cache.
 		 */
+		trace_android_rvh_read_swap_cache_async_timeout(&count, &skip);
+		if (skip)
+			continue;
+
 		schedule_timeout_uninterruptible(1);
 	}
 
@@ -539,6 +546,8 @@ struct folio *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 	put_swap_device(si);
 	return folio;
 }
+
+EXPORT_SYMBOL_GPL(read_swap_cache_async);
 
 static unsigned int __swapin_nr_pages(unsigned long prev_offset,
 				      unsigned long offset,

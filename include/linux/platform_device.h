@@ -11,6 +11,7 @@
 #define _PLATFORM_DEVICE_H_
 
 #include <linux/device.h>
+#include <linux/android_kabi.h>
 
 #define PLATFORM_DEVID_NONE	(-1)
 #define PLATFORM_DEVID_AUTO	(-2)
@@ -31,17 +32,15 @@ struct platform_device {
 	struct resource	*resource;
 
 	const struct platform_device_id	*id_entry;
-	/*
-	 * Driver name to force a match.  Do not set directly, because core
-	 * frees it.  Use driver_set_override() to set or clear it.
-	 */
-	const char *driver_override;
 
 	/* MFD cell pointer */
 	struct mfd_cell *mfd_cell;
 
 	/* arch specific additions */
 	struct pdev_archdata	archdata;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 #define platform_get_device_id(pdev)	((pdev)->id_entry)
@@ -134,6 +133,8 @@ struct platform_device_info {
 		u64 dma_mask;
 
 		const struct property_entry *properties;
+
+		ANDROID_KABI_RESERVE(1);
 };
 extern struct platform_device *platform_device_register_full(
 		const struct platform_device_info *pdevinfo);
@@ -252,6 +253,8 @@ struct platform_driver {
 	 * to setup and manage their own I/O address space.
 	 */
 	bool driver_managed_dma;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 #define to_platform_driver(drv)	(container_of((drv), struct platform_driver, \

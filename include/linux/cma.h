@@ -46,7 +46,8 @@ extern int __init cma_declare_contiguous_multi(phys_addr_t size,
 extern int cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 					unsigned int order_per_bit,
 					const char *name,
-					struct cma **res_cma);
+					struct cma **res_cma,
+					bool gcma);
 extern struct page *__cma_alloc(struct cma *cma, unsigned long count,
 				unsigned int align, gfp_t gfp);
 extern struct page *cma_alloc(struct cma *cma, unsigned long count, unsigned int align,
@@ -58,6 +59,15 @@ extern int cma_for_each_area(int (*it)(struct cma *cma, void *data), void *data)
 extern bool cma_intersects(struct cma *cma, unsigned long start, unsigned long end);
 
 extern void cma_reserve_pages_on_error(struct cma *cma);
+
+#ifdef CONFIG_DMA_CMA
+extern bool cma_skip_dt_default_reserved_mem(void);
+#else
+static inline bool cma_skip_dt_default_reserved_mem(void)
+{
+	return false;
+}
+#endif
 
 #ifdef CONFIG_CMA
 struct folio *cma_alloc_folio(struct cma *cma, int order, gfp_t gfp);

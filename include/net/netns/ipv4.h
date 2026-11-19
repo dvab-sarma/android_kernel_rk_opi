@@ -11,6 +11,7 @@
 #include <linux/rcupdate.h>
 #include <linux/seqlock.h>
 #include <linux/siphash.h>
+#include <linux/android_kabi.h>
 
 struct ctl_table_header;
 struct ipv4_devconf;
@@ -87,6 +88,12 @@ struct netns_ipv4 {
 	int sysctl_tcp_rmem[3];
 	__cacheline_group_end(netns_ipv4_read_rx);
 
+	/* ICMP rate limiter hot cache line. */
+	__cacheline_group_begin_aligned(icmp);
+	atomic_t	icmp_global_credit;
+	u32		icmp_global_stamp;
+	__cacheline_group_end_aligned(icmp);
+
 	struct inet_timewait_death_row tcp_death_row;
 	struct udp_table *udp_table;
 
@@ -139,8 +146,7 @@ struct netns_ipv4 {
 	int sysctl_icmp_ratemask;
 	int sysctl_icmp_msgs_per_sec;
 	int sysctl_icmp_msgs_burst;
-	atomic_t icmp_global_credit;
-	u32 icmp_global_stamp;
+
 	u32 ip_rt_min_pmtu;
 	int ip_rt_mtu_expires;
 	int ip_rt_min_advmss;
@@ -289,6 +295,8 @@ struct netns_ipv4 {
 	siphash_key_t	ip_id_key;
 	struct hlist_head	*inet_addr_lst;
 	struct delayed_work	addr_chk_work;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 #endif

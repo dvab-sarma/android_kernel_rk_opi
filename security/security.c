@@ -31,6 +31,9 @@
 #include <linux/fs.h>
 #include <net/flow.h>
 #include <net/sock.h>
+#include <linux/android_kabi.h>
+ANDROID_KABI_DECLONLY(trace_eval_map);
+#include <trace/hooks/security.h>
 
 #define SECURITY_HOOK_ACTIVE_KEY(HOOK, IDX) security_hook_active_##HOOK##_##IDX
 
@@ -78,6 +81,7 @@ const char *const lockdown_reasons[LOCKDOWN_CONFIDENTIALITY_MAX + 1] = {
 	[LOCKDOWN_BPF_WRITE_USER] = "use of bpf to write user RAM",
 	[LOCKDOWN_DBG_WRITE_KERNEL] = "use of kgdb/kdb to write kernel RAM",
 	[LOCKDOWN_RTAS_ERROR_INJECTION] = "RTAS error injection",
+	[LOCKDOWN_XEN_USER_ACTIONS] = "Xen guest user action",
 	[LOCKDOWN_INTEGRITY_MAX] = "integrity",
 	[LOCKDOWN_KCORE] = "/proc/kcore access",
 	[LOCKDOWN_KPROBES] = "use of kprobes",
@@ -1035,6 +1039,7 @@ int security_binder_set_context_mgr(const struct cred *mgr)
 {
 	return call_int_hook(binder_set_context_mgr, mgr);
 }
+EXPORT_SYMBOL_GPL(security_binder_set_context_mgr);
 
 /**
  * security_binder_transaction() - Check if a binder transaction is allowed
@@ -1050,6 +1055,7 @@ int security_binder_transaction(const struct cred *from,
 {
 	return call_int_hook(binder_transaction, from, to);
 }
+EXPORT_SYMBOL_GPL(security_binder_transaction);
 
 /**
  * security_binder_transfer_binder() - Check if a binder transfer is allowed
@@ -1065,6 +1071,7 @@ int security_binder_transfer_binder(const struct cred *from,
 {
 	return call_int_hook(binder_transfer_binder, from, to);
 }
+EXPORT_SYMBOL_GPL(security_binder_transfer_binder);
 
 /**
  * security_binder_transfer_file() - Check if a binder file xfer is allowed
@@ -1081,6 +1088,7 @@ int security_binder_transfer_file(const struct cred *from,
 {
 	return call_int_hook(binder_transfer_file, from, to, file);
 }
+EXPORT_SYMBOL_GPL(security_binder_transfer_file);
 
 /**
  * security_ptrace_access_check() - Check if tracing is allowed
@@ -1768,6 +1776,7 @@ static void inode_free_by_rcu(struct rcu_head *head)
  */
 void security_inode_free(struct inode *inode)
 {
+	trace_android_rvh_security_inode_free(inode);
 	call_void_hook(inode_free_security, inode);
 	if (!inode->i_security)
 		return;
@@ -3048,8 +3057,13 @@ static inline unsigned long mmap_prot(struct file *file, unsigned long prot)
 int security_mmap_file(struct file *file, unsigned long prot,
 		       unsigned long flags)
 {
-	return call_int_hook(mmap_file, file, prot, mmap_prot(file, prot),
+	int rc = call_int_hook(mmap_file, file, prot, mmap_prot(file, prot),
 			     flags);
+	if (rc)
+		return rc;
+	trace_android_rvh_security_mmap_file(file, prot, flags, &rc);
+
+	return rc;
 }
 
 /**
@@ -3180,7 +3194,14 @@ int security_file_receive(struct file *file)
  */
 int security_file_open(struct file *file)
 {
-	return call_int_hook(file_open, file);
+	int rc = call_int_hook(file_open, file);
+
+	if (rc)
+		return rc;
+
+	trace_android_rvh_security_file_open(file, &rc);
+
+	return rc;
 }
 
 /**
@@ -3230,6 +3251,10 @@ int security_task_alloc(struct task_struct *task, u64 clone_flags)
 
 	if (rc)
 		return rc;
+	trace_android_rvh_security_task_alloc(task, clone_flags, &rc);
+	if (rc)
+		return rc;
+
 	rc = call_int_hook(task_alloc, task, clone_flags);
 	if (unlikely(rc))
 		security_task_free(task);
@@ -3246,6 +3271,7 @@ int security_task_alloc(struct task_struct *task, u64 clone_flags)
 void security_task_free(struct task_struct *task)
 {
 	call_void_hook(task_free, task);
+	trace_android_rvh_security_task_free(task);
 
 	kfree(task->security);
 	task->security = NULL;
@@ -6116,6 +6142,18 @@ int security_uring_sqpoll(void)
 int security_uring_cmd(struct io_uring_cmd *ioucmd)
 {
 	return call_int_hook(uring_cmd, ioucmd);
+}
+
+/**
+ * security_uring_allowed() - Check if io_uring_setup() is allowed
+ *
+ * Check whether the current task is allowed to call io_uring_setup().
+ *
+ * Return: Returns 0 if permission is granted.
+ */
+int security_uring_allowed(void)
+{
+	return call_int_hook(uring_allowed);
 }
 #endif /* CONFIG_IO_URING */
 

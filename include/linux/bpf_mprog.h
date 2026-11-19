@@ -329,13 +329,23 @@ int bpf_mprog_detach(struct bpf_mprog_entry *entry,
 		     u32 flags, u32 id_or_fd, u64 revision);
 
 int bpf_mprog_query(const union bpf_attr *attr, union bpf_attr __user *uattr,
-		    struct bpf_mprog_entry *entry);
+		    u32 uattr_size, struct bpf_mprog_entry *entry);
 
 static inline bool bpf_mprog_supported(enum bpf_prog_type type)
 {
 	switch (type) {
 	case BPF_PROG_TYPE_SCHED_CLS:
 		return true;
+	default:
+		return false;
+	}
+}
+
+static inline bool bpf_mprog_detach_empty(enum bpf_prog_type type)
+{
+	switch (type) {
+	case BPF_PROG_TYPE_SCHED_CLS:
+		return bpf_net_capable();
 	default:
 		return false;
 	}

@@ -41,6 +41,7 @@
 #include <linux/shmem_fs.h>
 #include <trace/events/writeback.h>
 #include <trace/hooks/mm.h>
+#include <trace/hooks/fs.h>
 
 #include "internal.h"
 
@@ -1705,6 +1706,7 @@ static inline void wb_dirty_limits(struct dirty_throttle_control *dtc)
 		wb_reclaimable = wb_stat(wb, WB_RECLAIMABLE);
 		dtc->wb_dirty = wb_reclaimable + wb_stat(wb, WB_WRITEBACK);
 	}
+	trace_android_vh_wb_dirty_limits(&dtc->wb_dirty, wb);
 }
 
 static unsigned long domain_poll_intv(struct dirty_throttle_control *dtc,
@@ -2135,6 +2137,7 @@ static void wb_bg_dirty_limits(struct dirty_throttle_control *dtc)
 		dtc->wb_dirty = wb_stat_sum(wb, WB_RECLAIMABLE);
 	else
 		dtc->wb_dirty = wb_stat(wb, WB_RECLAIMABLE);
+	trace_android_vh_wb_dirty_limits(&dtc->wb_dirty, wb);
 }
 
 static bool domain_over_bg_thresh(struct dirty_throttle_control *dtc)
@@ -2427,6 +2430,7 @@ static bool folio_prepare_writeback(struct address_space *mapping,
 	if (folio_test_writeback(folio)) {
 		if (wbc->sync_mode == WB_SYNC_NONE)
 			return false;
+		trace_android_rvh_folio_prepare_wb_folio_wait(folio);
 		folio_wait_writeback(folio);
 	}
 	BUG_ON(folio_test_writeback(folio));
@@ -3069,6 +3073,7 @@ void __folio_start_writeback(struct folio *folio, bool keep_write)
 
 	lruvec_stat_mod_folio(folio, NR_WRITEBACK, nr);
 	zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
+	trace_android_vh_folio_start_writeback(folio);
 
 	access_ret = arch_make_folio_accessible(folio);
 	/*

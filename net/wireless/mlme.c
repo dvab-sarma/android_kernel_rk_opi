@@ -4,7 +4,7 @@
  *
  * Copyright (c) 2009, Jouni Malinen <j@w1.fi>
  * Copyright (c) 2015		Intel Deutschland GmbH
- * Copyright (C) 2019-2020, 2022-2025 Intel Corporation
+ * Copyright (C) 2019-2020, 2022-2026 Intel Corporation
  */
 
 #include <linux/kernel.h>
@@ -38,6 +38,7 @@ void cfg80211_rx_assoc_resp(struct net_device *dev,
 					u.assoc_resp.variable),
 		.status = le16_to_cpu(mgmt->u.assoc_resp.status_code),
 		.ap_mld_addr = data->ap_mld_addr,
+		.assoc_encrypted = data->assoc_encrypted,
 	};
 	unsigned int link_id;
 
@@ -782,8 +783,8 @@ void cfg80211_mlme_unregister_socket(struct wireless_dev *wdev, u32 nlportid)
 		rdev_crit_proto_stop(rdev, wdev);
 	}
 
-	if (nlportid == wdev->ap_unexpected_nlportid)
-		wdev->ap_unexpected_nlportid = 0;
+	if (nlportid == wdev->unexpected_nlportid)
+		wdev->unexpected_nlportid = 0;
 }
 
 void cfg80211_mlme_purge_registrations(struct wireless_dev *wdev)
@@ -933,12 +934,18 @@ int cfg80211_mlme_mgmt_tx(struct cfg80211_registered_device *rdev,
 			 * cfg80211 doesn't track the stations
 			 */
 			break;
+		case NL80211_IFTYPE_NAN:
+		case NL80211_IFTYPE_NAN_DATA:
+			if (mgmt->u.action.category !=
+			    WLAN_CATEGORY_PROTECTED_DUAL_OF_ACTION)
+				err = -EOPNOTSUPP;
+			break;
 		case NL80211_IFTYPE_P2P_DEVICE:
 			/*
 			 * fall through, P2P device only supports
 			 * public action frames
 			 */
-		case NL80211_IFTYPE_NAN:
+		case NL80211_IFTYPE_PD:
 		default:
 			err = -EOPNOTSUPP;
 			break;
@@ -1293,6 +1300,25 @@ cfg80211_start_background_radar_detection(struct cfg80211_registered_device *rde
 			   msecs_to_jiffies(cac_time_ms));
 
 	return 0;
+}
+
+void cfg80211_stop_radar_detection(struct wireless_dev *wdev)
+{
+	struct wiphy *wiphy = wdev->wiphy;
+	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wiphy);
+	int link_id;
+
+	for_each_valid_link(wdev, link_id) {
+		struct cfg80211_chan_def chandef;
+
+		if (!wdev->links[link_id].cac_started)
+			continue;
+
+		chandef = *wdev_chandef(wdev, link_id);
+		rdev_end_cac(rdev, wdev->netdev, link_id);
+		nl80211_radar_notify(rdev, &chandef, NL80211_RADAR_CAC_ABORTED,
+				     wdev->netdev, GFP_KERNEL);
+	}
 }
 
 void cfg80211_stop_background_radar_detection(struct wireless_dev *wdev)

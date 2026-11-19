@@ -166,7 +166,7 @@ static int query_compatibility_version(struct xe_gsc *gsc)
 				     &rd_offset);
 	if (err) {
 		xe_gt_err(gt, "HuC: invalid GSC reply for version query (err=%d)\n", err);
-		return err;
+		goto out_bo;
 	}
 
 	compat->major = version_query_rd(xe, &bo->vmap, rd_offset, proj_major);
@@ -420,14 +420,15 @@ int xe_gsc_init(struct xe_gsc *gsc)
 	}
 
 	/*
-	 * Some platforms can have GuC but not GSC. That would cause
-	 * xe_uc_fw_init(gsc) to return a "not supported" failure code and abort
-	 * all firmware loading. So check for GSC being enabled before
-	 * propagating the failure back up. That way the higher level will keep
-	 * going and load GuC as appropriate.
+	 * Starting from BMG the GSC is no longer needed for MC6 entry, so the
+	 * only missing features if the FW is lacking would be the content
+	 * protection ones. This is acceptable, so we allow the driver load to
+	 * continue if the GSC FW is missing.
 	 */
 	ret = xe_uc_fw_init(&gsc->fw);
 	if (!xe_uc_fw_is_enabled(&gsc->fw))
+		return 0;
+	else if (gt_to_xe(gt)->info.platform >= XE_BATTLEMAGE && !xe_uc_fw_is_available(&gsc->fw))
 		return 0;
 	else if (ret)
 		goto out;
@@ -487,8 +488,7 @@ int xe_gsc_init_post_hwconfig(struct xe_gsc *gsc)
 				 EXEC_QUEUE_FLAG_PERMANENT, 0);
 	if (IS_ERR(q)) {
 		xe_gt_err(gt, "Failed to create queue for GSC submission\n");
-		err = PTR_ERR(q);
-		goto out_bo;
+		return PTR_ERR(q);
 	}
 
 	wq = alloc_ordered_workqueue("gsc-ordered-wq", 0);
@@ -511,8 +511,6 @@ int xe_gsc_init_post_hwconfig(struct xe_gsc *gsc)
 
 out_q:
 	xe_exec_queue_put(q);
-out_bo:
-	xe_bo_unpin_map_no_vm(bo);
 	return err;
 }
 
@@ -621,7 +619,7 @@ void xe_gsc_print_info(struct xe_gsc *gsc, struct drm_printer *p)
 
 	drm_printf(p, "\tfound security version %u\n", gsc->security_version);
 
-	if (!xe_uc_fw_is_enabled(&gsc->fw))
+	if (!xe_uc_fw_is_available(&gsc->fw))
 		return;
 
 	fw_ref = xe_force_wake_get(gt_to_fw(gt), XE_FW_GSC);

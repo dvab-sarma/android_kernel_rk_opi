@@ -455,46 +455,72 @@ static int handle_trap_exceptions(struct kvm_vcpu *vcpu)
 	return handled;
 }
 
-static int handle_hyp_req_mem(struct kvm_vcpu *vcpu,
-			      struct kvm_hyp_req *req)
+static int handle_hyp_req_mem(struct kvm_vcpu *vcpu, struct kvm_hyp_req *req)
 {
-	struct kvm *kvm = vcpu->kvm;
 	unsigned long nr_pages;
+	struct kvm *kvm;
 	int ret;
 
-	switch (req->mem.dest) {
-	case REQ_MEM_DEST_HYP_ALLOC:
-		return __pkvm_topup_hyp_alloc(req->mem.nr_pages);
+	if (!vcpu)
+		return -EINVAL;
+
+	kvm = vcpu->kvm;
+
+	switch (req->memcache.dest) {
 	case REQ_MEM_DEST_VCPU_MEMCACHE:
 		nr_pages = vcpu->arch.stage2_mc.nr_pages;
 		ret = topup_hyp_memcache(&vcpu->arch.stage2_mc,
-					 req->mem.nr_pages, 0);
+					 req->memcache.nr_pages, 0);
 		nr_pages = vcpu->arch.stage2_mc.nr_pages - nr_pages;
 		atomic64_add(nr_pages << PAGE_SHIFT, &kvm->stat.protected_hyp_mem);
 
 		return ret;
 	case REQ_MEM_DEST_HYP_IOMMU:
 		return kvm_iommu_guest_alloc_mc(&vcpu->arch.iommu_mc,
-						req->mem.sz_alloc, req->mem.nr_pages);
+						req->memcache.sz_alloc, req->memcache.nr_pages);
 	};
 
-	pr_warn("Unknown kvm_hyp_req mem dest: %d\n", req->mem.dest);
-
+	pr_warn("Unknown kvm_hyp_req mem dest: %d\n", req->memcache.dest);
 	return -EINVAL;
 }
 
-static int handle_hyp_req_map(struct kvm_vcpu *vcpu,
-			      struct kvm_hyp_req *req)
+int handle_hyp_req(struct kvm_vcpu *vcpu, struct kvm_hyp_req *req, void *arg)
 {
-	return pkvm_mem_abort_range(vcpu, req->map.guest_ipa, req->map.size);
+	trace_kvm_handle_hyp_req(vcpu, req);
+
+	switch (req->type) {
+	case KVM_HYP_REQ_TYPE_HYP_ALLOC:
+		return __pkvm_topup_hyp_alloc(req->mem.nr_pages);
+
+	case KVM_HYP_REQ_TYPE_MEM_IOMMU:
+		return __pkvm_topup_hyp_iommu(1, req->mem.nr_pages << PAGE_SHIFT,
+					      (gfp_t)(uintptr_t)arg);
+
+	case KVM_HYP_REQ_TYPE_MEM:
+		return handle_hyp_req_mem(vcpu, req);
+
+	case KVM_HYP_REQ_TYPE_MAP:
+		if (!vcpu)
+			return -EINVAL;
+		return pkvm_mem_abort_range(vcpu, req->map.guest_ipa, req->map.size);
+
+	case KVM_HYP_REQ_TYPE_SPLIT:
+		if (!vcpu)
+			return -EINVAL;
+		return __pkvm_pgtable_stage2_split(vcpu, req->split.guest_ipa, req->split.size);
+
+	case KVM_HYP_REQ_TYPE_MEM_HOST_S2:
+		return pkvm_host_stage2_topup(arg ? (gfp_t)(uintptr_t)arg : GFP_KERNEL);
+
+	case KVM_HYP_LAST_REQ:
+		return 0;
+	}
+
+	pr_warn("Unknown kvm_hyp_req type: %d\n", req->type);
+	return -EINVAL;
 }
 
-static int handle_hyp_req_split(struct kvm_vcpu *vcpu, struct kvm_hyp_req *req)
-{
-	return __pkvm_pgtable_stage2_split(vcpu, req->split.guest_ipa, req->split.size);
-}
-
-static int handle_hyp_req(struct kvm_vcpu *vcpu)
+static int handle_hyp_reqs(struct kvm_vcpu *vcpu)
 {
 	struct kvm_hyp_req *hyp_req = vcpu->arch.hyp_reqs;
 	int i, ret;
@@ -503,21 +529,7 @@ static int handle_hyp_req(struct kvm_vcpu *vcpu)
 		if (hyp_req->type == KVM_HYP_LAST_REQ)
 			break;
 
-		switch (hyp_req->type) {
-		case KVM_HYP_REQ_TYPE_MEM:
-			ret = handle_hyp_req_mem(vcpu, hyp_req);
-			break;
-		case KVM_HYP_REQ_TYPE_MAP:
-			ret = handle_hyp_req_map(vcpu, hyp_req);
-			break;
-		case KVM_HYP_REQ_TYPE_SPLIT:
-			ret = handle_hyp_req_split(vcpu, hyp_req);
-			break;
-		default:
-			pr_warn("Unknown kvm_hyp_req type: %d\n", hyp_req->type);
-			ret = -EINVAL;
-		}
-
+		ret = handle_hyp_req(vcpu, hyp_req, NULL);
 		if (ret)
 			return ret;
 	}
@@ -566,7 +578,7 @@ int handle_exit(struct kvm_vcpu *vcpu, int exception_index)
 		run->exit_reason = KVM_EXIT_FAIL_ENTRY;
 		return -EINVAL;
 	case ARM_EXCEPTION_HYP_REQ:
-		return handle_hyp_req(vcpu);
+		return handle_hyp_reqs(vcpu);
 	default:
 		kvm_pr_unimpl("Unsupported exception type: %d",
 			      exception_index);
@@ -644,7 +656,7 @@ void __noreturn __cold nvhe_hyp_panic_handler(u64 esr, u64 spsr,
 		/* All hyp bugs, including warnings, are treated as fatal. */
 		if (!is_protected_kvm_enabled() ||
 		    IS_ENABLED(CONFIG_PKVM_DISABLE_STAGE2_ON_PANIC)) {
-			struct bug_entry *bug = find_bug(elr_in_kimg);
+			struct bug_entry *bug = find_bug(panic_addr + kaslr_off);
 
 			if (bug)
 				bug_get_file_line(bug, &file, &line);
@@ -669,7 +681,8 @@ void __noreturn __cold nvhe_hyp_panic_handler(u64 esr, u64 spsr,
 	kvm_nvhe_dump_backtrace(hyp_offset);
 
 	/* Dump the faulting instruction */
-	dump_kernel_instr(panic_addr + kaslr_offset());
+	if (!mod_addr)
+		dump_kernel_instr(panic_addr + kaslr_offset());
 
 	/*
 	 * Hyp has panicked and we're going to handle that by panicking the

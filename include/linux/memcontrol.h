@@ -23,6 +23,7 @@
 #include <linux/writeback.h>
 #include <linux/page-flags.h>
 #include <linux/shrinker.h>
+#include <linux/android_kabi.h>
 
 struct mem_cgroup;
 struct obj_cgroup;
@@ -58,6 +59,7 @@ enum memcg_memory_event {
 struct mem_cgroup_reclaim_cookie {
 	pg_data_t *pgdat;
 	int generation;
+	ANDROID_KABI_RESERVE(1);
 };
 
 #ifdef CONFIG_MEMCG
@@ -119,6 +121,8 @@ struct mem_cgroup_per_node {
 	atomic_t		slab_reclaimable;
 	atomic_t		slab_unreclaimable;
 #endif
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct mem_cgroup_threshold {
@@ -178,6 +182,8 @@ struct obj_cgroup {
 		struct list_head list; /* protected by objcg_lock */
 		struct rcu_head rcu;
 	};
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /*
@@ -320,8 +326,9 @@ struct mem_cgroup {
 	spinlock_t event_list_lock;
 #endif /* CONFIG_MEMCG_V1 */
 
-	ANDROID_OEM_DATA(1);
+	ANDROID_OEM_DATA_ARRAY(1, 2);
 	ANDROID_VENDOR_DATA(1);
+	ANDROID_KABI_RESERVE(1);
 
 	struct mem_cgroup_per_node *nodeinfo[];
 };
@@ -372,6 +379,11 @@ enum objext_flags {
 #ifdef CONFIG_MEMCG
 
 static inline bool folio_memcg_kmem(struct folio *folio);
+
+void do_traversal_all_lruvec(int (*callback)(struct mem_cgroup *memcg,
+					     struct lruvec *lruvec,
+					     void *private),
+			     void *private);
 
 /*
  * After the initialization objcg->memcg is always pointing at
@@ -1792,7 +1804,7 @@ static inline void count_objcg_events(struct obj_cgroup *objcg,
 	rcu_read_unlock();
 }
 
-bool mem_cgroup_node_allowed(struct mem_cgroup *memcg, int nid);
+void mem_cgroup_node_filter_allowed(struct mem_cgroup *memcg, nodemask_t *mask);
 
 #else
 static inline bool mem_cgroup_kmem_disabled(void)
@@ -1856,11 +1868,21 @@ static inline ino_t page_cgroup_ino(struct page *page)
 	return 0;
 }
 
-static inline bool mem_cgroup_node_allowed(struct mem_cgroup *memcg, int nid)
+static inline void mem_cgroup_node_filter_allowed(struct mem_cgroup *memcg,
+						  nodemask_t *mask)
 {
-	return true;
 }
 #endif /* CONFIG_MEMCG */
+
+#if defined(CONFIG_MEMCG) && defined(CONFIG_LRU_GEN)
+void mem_cgroup_calculate_protection_path(struct mem_cgroup *root,
+					  struct mem_cgroup *memcg);
+#else
+static inline void mem_cgroup_calculate_protection_path(struct mem_cgroup *root,
+							struct mem_cgroup *memcg)
+{
+}
+#endif
 
 #if defined(CONFIG_MEMCG) && defined(CONFIG_ZSWAP)
 bool obj_cgroup_may_zswap(struct obj_cgroup *objcg);

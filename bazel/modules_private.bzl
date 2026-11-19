@@ -10,6 +10,7 @@ visibility("private")
 
 _COMMON_GKI_MODULES_LIST = [
     # keep sorted
+    "drivers/android/binder/rust_binder.ko",
     "drivers/block/virtio_blk.ko",
     "drivers/block/zram/zram.ko",
     "drivers/bluetooth/btbcm.ko",
@@ -18,6 +19,7 @@ _COMMON_GKI_MODULES_LIST = [
     "drivers/bluetooth/hci_uart.ko",
     "drivers/char/virtio_console.ko",
     "drivers/gnss/gnss.ko",
+    "drivers/misc/open-dice.ko",
     "drivers/misc/vcpu_stall_detector.ko",
     "drivers/net/can/dev/can-dev.ko",
     "drivers/net/can/slcan/slcan.ko",
@@ -87,33 +89,31 @@ _COMMON_GKI_MODULES_LIST = [
     "net/rfkill/rfkill.ko",
     "net/tipc/tipc.ko",
     "net/tipc/tipc_diag.ko",
-    "net/tls/tls.ko",
     "net/vmw_vsock/vmw_vsock_virtio_transport.ko",
 ]
 
-# Deprecated - Use `get_gki_modules_list` function instead.
-COMMON_GKI_MODULES_LIST = _COMMON_GKI_MODULES_LIST
-
 _ARM_GKI_MODULES_LIST = [
     # keep sorted
-    "drivers/ptp/ptp_kvm.ko",
 ]
 
 _ARM64_GKI_MODULES_LIST = [
     # keep sorted
+    "arch/arm64/geniezone/gzvm.ko",
     "drivers/char/hw_random/cctrng.ko",
-    "drivers/misc/open-dice.ko",
-    "drivers/ptp/ptp_kvm.ko",
+    "drivers/hwtracing/coresight/coresight.ko",
+    "drivers/hwtracing/coresight/coresight-etm4x.ko",
+    "drivers/hwtracing/coresight/coresight-funnel.ko",
+    "drivers/hwtracing/coresight/coresight-replicator.ko",
+    "drivers/hwtracing/coresight/coresight-trbe.ko",
+    "drivers/perf/dwc_pcie_pmu.ko",
 ]
 
 _X86_GKI_MODULES_LIST = [
     # keep sorted
-    "drivers/ptp/ptp_kvm.ko",
 ]
 
 _X86_64_GKI_MODULES_LIST = [
     # keep sorted
-    "drivers/ptp/ptp_kvm.ko",
 ]
 
 def _apply(map_each, lst):
@@ -300,6 +300,11 @@ def get_kunit_modules_superset(arch = None, map_each = None):
 
 _COMMON_UNPROTECTED_MODULES_LIST = [
     "drivers/block/zram/zram.ko",
+    "drivers/hwtracing/coresight/coresight.ko",
+    "drivers/hwtracing/coresight/coresight-etm4x.ko",
+    "drivers/hwtracing/coresight/coresight-funnel.ko",
+    "drivers/hwtracing/coresight/coresight-replicator.ko",
+    "drivers/hwtracing/coresight/coresight-trbe.ko",
     "mm/zsmalloc.ko",
 ]
 

@@ -8,6 +8,7 @@
  * Copyright (c) 2016, Damien Le Moal
  * Copyright (c) 2016, Western Digital
  * Copyright (c) 2024, Western Digital Corporation or its affiliates.
+ * Copyright 2025 Google LLC
  */
 
 #include <linux/kernel.h>
@@ -53,6 +54,8 @@ static const char *const zone_cond_name[] = {
  * @zone_no: The number of the zone the plug is managing.
  * @wp_offset: The zone write pointer location relative to the start of the zone
  *             as a number of 512B sectors.
+ * @from_cpu: Software queue to submit writes from for drivers that preserve
+ *	the write order.
  * @bio_list: The list of BIOs that are currently plugged.
  * @bio_work: Work struct to handle issuing of plugged BIOs
  * @rcu_head: RCU head to free zone write plugs with an RCU grace period.
@@ -65,17 +68,22 @@ struct blk_zone_wplug {
 	unsigned int		flags;
 	unsigned int		zone_no;
 	unsigned int		wp_offset;
+	int			from_cpu;
 	struct bio_list		bio_list;
 	struct work_struct	bio_work;
 	struct rcu_head		rcu_head;
 	struct gendisk		*disk;
 };
 
+static inline unsigned int disk_zone_wplugs_hash_size(struct gendisk *disk)
+{
+	return 1U << disk->zone_wplugs_hash_bits;
+}
+
 /*
  * Zone write plug flags bits:
  *  - BLK_ZONE_WPLUG_PLUGGED: Indicates that the zone write plug is plugged,
- *    that is, that write BIOs are being throttled due to a write BIO already
- *    being executed or the zone write plug bio list is not empty.
+ *    that is, that write BIOs are being throttled.
  *  - BLK_ZONE_WPLUG_NEED_WP_UPDATE: Indicates that we lost track of a zone
  *    write pointer offset and need to update it.
  *  - BLK_ZONE_WPLUG_UNHASHED: Indicates that the zone write plug was removed
@@ -572,6 +580,7 @@ again:
 	zwplug->flags = 0;
 	zwplug->zone_no = zno;
 	zwplug->wp_offset = bdev_offset_from_zone_start(disk->part0, sector);
+	zwplug->from_cpu = -1;
 	bio_list_init(&zwplug->bio_list);
 	INIT_WORK(&zwplug->bio_work, blk_zone_wplug_bio_work);
 	zwplug->disk = disk;
@@ -600,7 +609,7 @@ static inline void blk_zone_wplug_bio_io_error(struct blk_zone_wplug *zwplug,
 	bio_clear_flag(bio, BIO_ZONE_WRITE_PLUGGING);
 	bio_io_error(bio);
 	disk_put_zone_wplug(zwplug);
-	/* Drop the reference taken by disk_zone_wplug_add_bio(() */
+	/* Drop the reference taken by disk_zone_wplug_add_bio(). */
 	blk_queue_exit(q);
 }
 
@@ -611,6 +620,8 @@ static void disk_zone_wplug_abort(struct blk_zone_wplug *zwplug)
 {
 	struct bio *bio;
 
+	lockdep_assert_held(&zwplug->lock);
+
 	if (bio_list_empty(&zwplug->bio_list))
 		return;
 
@@ -618,6 +629,8 @@ static void disk_zone_wplug_abort(struct blk_zone_wplug *zwplug)
 			    zwplug->disk->disk_name, zwplug->zone_no);
 	while ((bio = bio_list_pop(&zwplug->bio_list)))
 		blk_zone_wplug_bio_io_error(zwplug, bio);
+
+	zwplug->flags &= ~BLK_ZONE_WPLUG_PLUGGED;
 }
 
 /*
@@ -698,92 +711,124 @@ static int disk_zone_sync_wp_offset(struct gendisk *disk, sector_t sector)
 					disk_report_zones_cb, &args);
 }
 
-static bool blk_zone_wplug_handle_reset_or_finish(struct bio *bio,
-						  unsigned int wp_offset)
+static void blk_zone_reset_bio_endio(struct bio *bio)
 {
 	struct gendisk *disk = bio->bi_bdev->bd_disk;
-	sector_t sector = bio->bi_iter.bi_sector;
 	struct blk_zone_wplug *zwplug;
-	unsigned long flags;
-
-	/* Conventional zones cannot be reset nor finished. */
-	if (!bdev_zone_is_seq(bio->bi_bdev, sector)) {
-		bio_io_error(bio);
-		return true;
-	}
 
 	/*
-	 * No-wait reset or finish BIOs do not make much sense as the callers
-	 * issue these as blocking operations in most cases. To avoid issues
-	 * the BIO execution potentially failing with BLK_STS_AGAIN, warn about
-	 * REQ_NOWAIT being set and ignore that flag.
-	 */
-	if (WARN_ON_ONCE(bio->bi_opf & REQ_NOWAIT))
-		bio->bi_opf &= ~REQ_NOWAIT;
-
-	/*
-	 * If we have a zone write plug, set its write pointer offset to 0
-	 * (reset case) or to the zone size (finish case). This will abort all
-	 * BIOs plugged for the target zone. It is fine as resetting or
-	 * finishing zones while writes are still in-flight will result in the
+	 * If we have a zone write plug, set its write pointer offset to 0.
+	 * This will abort all BIOs plugged for the target zone. It is fine as
+	 * resetting zones while writes are still in-flight will result in the
 	 * writes failing anyway.
 	 */
-	zwplug = disk_get_zone_wplug(disk, sector);
+	zwplug = disk_get_zone_wplug(disk, bio->bi_iter.bi_sector);
 	if (zwplug) {
+		unsigned long flags;
+
 		spin_lock_irqsave(&zwplug->lock, flags);
-		disk_zone_wplug_set_wp_offset(disk, zwplug, wp_offset);
+		disk_zone_wplug_set_wp_offset(disk, zwplug, 0);
 		spin_unlock_irqrestore(&zwplug->lock, flags);
 		disk_put_zone_wplug(zwplug);
 	}
-
-	return false;
 }
 
-static bool blk_zone_wplug_handle_reset_all(struct bio *bio)
+static void blk_zone_reset_all_bio_endio(struct bio *bio)
 {
 	struct gendisk *disk = bio->bi_bdev->bd_disk;
 	struct blk_zone_wplug *zwplug;
 	unsigned long flags;
-	sector_t sector;
+	unsigned int i;
+
+	if (atomic_read(&disk->nr_zone_wplugs)) {
+		/* Update the condition of all zone write plugs. */
+		rcu_read_lock();
+		for (i = 0; i < disk_zone_wplugs_hash_size(disk); i++) {
+			hlist_for_each_entry_rcu(zwplug,
+						 &disk->zone_wplugs_hash[i],
+						 node) {
+				spin_lock_irqsave(&zwplug->lock, flags);
+				disk_zone_wplug_set_wp_offset(disk, zwplug, 0);
+				spin_unlock_irqrestore(&zwplug->lock, flags);
+			}
+		}
+		rcu_read_unlock();
+	}
+}
+
+static void blk_zone_finish_bio_endio(struct bio *bio)
+{
+	struct block_device *bdev = bio->bi_bdev;
+	struct gendisk *disk = bdev->bd_disk;
+	struct blk_zone_wplug *zwplug;
 
 	/*
-	 * Set the write pointer offset of all zone write plugs to 0. This will
-	 * abort all plugged BIOs. It is fine as resetting zones while writes
-	 * are still in-flight will result in the writes failing anyway.
+	 * If we have a zone write plug, set its write pointer offset to the
+	 * zone size. This will abort all BIOs plugged for the target zone. It
+	 * is fine as resetting zones while writes are still in-flight will
+	 * result in the writes failing anyway.
 	 */
-	for (sector = 0; sector < get_capacity(disk);
-	     sector += disk->queue->limits.chunk_sectors) {
-		zwplug = disk_get_zone_wplug(disk, sector);
-		if (zwplug) {
-			spin_lock_irqsave(&zwplug->lock, flags);
-			disk_zone_wplug_set_wp_offset(disk, zwplug, 0);
-			spin_unlock_irqrestore(&zwplug->lock, flags);
-			disk_put_zone_wplug(zwplug);
-		}
-	}
+	zwplug = disk_get_zone_wplug(disk, bio->bi_iter.bi_sector);
+	if (zwplug) {
+		unsigned long flags;
 
-	return false;
+		spin_lock_irqsave(&zwplug->lock, flags);
+		disk_zone_wplug_set_wp_offset(disk, zwplug,
+					      bdev_zone_sectors(bdev));
+		spin_unlock_irqrestore(&zwplug->lock, flags);
+		disk_put_zone_wplug(zwplug);
+	}
+}
+
+void blk_zone_mgmt_bio_endio(struct bio *bio)
+{
+	/* If the BIO failed, we have nothing to do. */
+	if (bio->bi_status != BLK_STS_OK)
+		return;
+
+	switch (bio_op(bio)) {
+	case REQ_OP_ZONE_RESET:
+		blk_zone_reset_bio_endio(bio);
+		return;
+	case REQ_OP_ZONE_RESET_ALL:
+		blk_zone_reset_all_bio_endio(bio);
+		return;
+	case REQ_OP_ZONE_FINISH:
+		blk_zone_finish_bio_endio(bio);
+		return;
+	default:
+		return;
+	}
 }
 
 static void disk_zone_wplug_schedule_bio_work(struct gendisk *disk,
 					      struct blk_zone_wplug *zwplug)
 {
+	int cpu;
+
+	lockdep_assert_held(&zwplug->lock);
+
 	/*
-	 * Take a reference on the zone write plug and schedule the submission
-	 * of the next plugged BIO. blk_zone_wplug_bio_work() will release the
-	 * reference we take here.
+	 * Schedule a blk_zone_wplug_bio_work() call and increase the zone write
+	 * plug reference count. blk_zone_wplug_bio_work() will release the
+	 * reference we take here. Increasing the zone write plug reference
+	 * count after the queue_work_on() call is safe because all callers hold
+	 * the zone write plug lock and blk_zone_wplug_bio_work() obtains the
+	 * same lock before decrementing the reference count.
 	 */
 	WARN_ON_ONCE(!(zwplug->flags & BLK_ZONE_WPLUG_PLUGGED));
-	refcount_inc(&zwplug->ref);
-	queue_work(disk->zone_wplugs_wq, &zwplug->bio_work);
+	if (zwplug->from_cpu >= 0)
+		cpu = zwplug->from_cpu;
+	else
+		cpu = WORK_CPU_UNBOUND;
+	if (queue_work_on(cpu, disk->zone_wplugs_wq, &zwplug->bio_work))
+		refcount_inc(&zwplug->ref);
 }
 
 static inline void disk_zone_wplug_add_bio(struct gendisk *disk,
 				struct blk_zone_wplug *zwplug,
 				struct bio *bio, unsigned int nr_segs)
 {
-	bool schedule_bio_work = false;
-
 	/*
 	 * Grab an extra reference on the BIO request queue usage counter.
 	 * This reference will be reused to submit a request for the BIO for
@@ -800,16 +845,6 @@ static inline void disk_zone_wplug_add_bio(struct gendisk *disk,
 	bio_clear_polled(bio);
 
 	/*
-	 * REQ_NOWAIT BIOs are always handled using the zone write plug BIO
-	 * work, which can block. So clear the REQ_NOWAIT flag and schedule the
-	 * work if this is the first BIO we are plugging.
-	 */
-	if (bio->bi_opf & REQ_NOWAIT) {
-		schedule_bio_work = !(zwplug->flags & BLK_ZONE_WPLUG_PLUGGED);
-		bio->bi_opf &= ~REQ_NOWAIT;
-	}
-
-	/*
 	 * Reuse the poll cookie field to store the number of segments when
 	 * split to the hardware limits.
 	 */
@@ -824,11 +859,6 @@ static inline void disk_zone_wplug_add_bio(struct gendisk *disk,
 	bio_list_add(&zwplug->bio_list, bio);
 	trace_disk_zone_wplug_add_bio(zwplug->disk->queue, zwplug->zone_no,
 				      bio->bi_iter.bi_sector, bio_sectors(bio));
-
-	zwplug->flags |= BLK_ZONE_WPLUG_PLUGGED;
-
-	if (schedule_bio_work)
-		disk_zone_wplug_schedule_bio_work(disk, zwplug);
 }
 
 /*
@@ -989,13 +1019,18 @@ static bool blk_zone_wplug_prepare_bio(struct blk_zone_wplug *zwplug,
 	return true;
 }
 
-static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
+static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs,
+					int rq_cpu)
 {
 	struct gendisk *disk = bio->bi_bdev->bd_disk;
+	const bool pipeline_zwr = bio_op(bio) != REQ_OP_ZONE_APPEND &&
+				 blk_pipeline_zwr(disk->queue);
 	sector_t sector = bio->bi_iter.bi_sector;
+	bool schedule_bio_work = false;
 	struct blk_zone_wplug *zwplug;
 	gfp_t gfp_mask = GFP_NOIO;
 	unsigned long flags;
+	int from_cpu = -1;
 
 	/*
 	 * BIOs must be fully contained within a zone so that we use the correct
@@ -1032,18 +1067,51 @@ static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 		return true;
 	}
 
+	/*
+	 * Disable write pipelining while a flush request is in progress since
+	 * these requests pass through the requeue list and hence could be
+	 * reordered if pipelined.
+	 */
+	if (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA) &&
+	    !bdev_test_flag(bio->bi_bdev, BD_HAS_SUBMIT_BIO))
+		bio->bi_opf |= REQ_ZONE_SERIALIZED;
+
 	/* Indicate that this BIO is being handled using zone write plugging. */
 	bio_set_flag(bio, BIO_ZONE_WRITE_PLUGGING);
 
 	/*
-	 * If the zone is already plugged, add the BIO to the plug BIO list.
-	 * Do the same for REQ_NOWAIT BIOs to ensure that we will not see a
+	 * Add REQ_NOWAIT BIOs to the plug list to ensure that we will not see a
 	 * BLK_STS_AGAIN failure if we let the BIO execute.
-	 * Otherwise, plug and let the BIO execute.
 	 */
-	if ((zwplug->flags & BLK_ZONE_WPLUG_PLUGGED) ||
-	    (bio->bi_opf & REQ_NOWAIT))
-		goto plug;
+	if (bio->bi_opf & REQ_NOWAIT) {
+		bio->bi_opf &= ~REQ_NOWAIT;
+		goto add_to_bio_list;
+	}
+
+	/* If the zone is already plugged, add the BIO to the plug BIO list. */
+	if (zwplug->flags & BLK_ZONE_WPLUG_PLUGGED)
+		goto add_to_bio_list;
+
+	/*
+	 * The code below has been organized such that zwplug->from_cpu and
+	 * zwplug->flags are only modified after it is clear that a request will
+	 * be added to the bio list or that it will be submitted by the
+	 * caller. This prevents that any changes to these member variables have
+	 * to be reverted if the blk_zone_wplug_prepare_bio() call fails.
+	 */
+
+	if (pipeline_zwr) {
+		if (zwplug->from_cpu >= 0)
+			from_cpu = zwplug->from_cpu;
+		else
+			from_cpu = smp_processor_id();
+		if ((from_cpu != rq_cpu && !blk_use_zwor(disk->queue)) ||
+		    !bio_list_empty(&zwplug->bio_list) ||
+		    work_busy(&zwplug->bio_work)) {
+			zwplug->from_cpu = from_cpu;
+			goto add_to_bio_list;
+		}
+	}
 
 	if (!blk_zone_wplug_prepare_bio(zwplug, bio)) {
 		spin_unlock_irqrestore(&zwplug->lock, flags);
@@ -1051,14 +1119,33 @@ static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 		return true;
 	}
 
-	zwplug->flags |= BLK_ZONE_WPLUG_PLUGGED;
+	if (pipeline_zwr && !(bio->bi_opf & REQ_ZONE_SERIALIZED)) {
+		/*
+		 * The block driver preserves the write order and serialization
+		 * is not required. Submit future writes from the same CPU core
+		 * as ongoing writes.
+		 */
+		zwplug->from_cpu = from_cpu;
+	} else {
+		/*
+		 * The block driver does not preserve the write order or
+		 * serialization is required. Plug and let the caller submit the
+		 * BIO.
+		 */
+		zwplug->flags |= BLK_ZONE_WPLUG_PLUGGED;
+	}
 
 	spin_unlock_irqrestore(&zwplug->lock, flags);
 
 	return false;
 
-plug:
+add_to_bio_list:
+	schedule_bio_work = !(zwplug->flags & BLK_ZONE_WPLUG_PLUGGED);
+	zwplug->flags |= BLK_ZONE_WPLUG_PLUGGED;
+
 	disk_zone_wplug_add_bio(disk, zwplug, bio, nr_segs);
+	if (schedule_bio_work)
+		disk_zone_wplug_schedule_bio_work(disk, zwplug);
 
 	spin_unlock_irqrestore(&zwplug->lock, flags);
 
@@ -1106,10 +1193,37 @@ static void blk_zone_wplug_handle_native_zone_append(struct bio *bio)
 	disk_put_zone_wplug(zwplug);
 }
 
+static bool blk_zone_wplug_handle_zone_mgmt(struct bio *bio)
+{
+	if (bio_op(bio) != REQ_OP_ZONE_RESET_ALL &&
+	    !bdev_zone_is_seq(bio->bi_bdev, bio->bi_iter.bi_sector)) {
+		/*
+		 * Zone reset and zone finish operations do not apply to
+		 * conventional zones.
+		 */
+		bio_io_error(bio);
+		return true;
+	}
+
+	/*
+	 * No-wait zone management BIOs do not make much sense as the callers
+	 * issue these as blocking operations in most cases. To avoid issues
+	 * with the BIO execution potentially failing with BLK_STS_AGAIN, warn
+	 * about REQ_NOWAIT being set and ignore that flag.
+	 */
+	if (WARN_ON_ONCE(bio->bi_opf & REQ_NOWAIT))
+		bio->bi_opf &= ~REQ_NOWAIT;
+
+	return false;
+}
+
 /**
  * blk_zone_plug_bio - Handle a zone write BIO with zone write plugging
  * @bio: The BIO being submitted
  * @nr_segs: The number of physical segments of @bio
+ * @rq_cpu: software queue onto which a request will be queued. -1 if the caller
+ *	has not yet decided onto which software queue to queue the request or if
+ *	the bio won't be converted into a request.
  *
  * Handle write, write zeroes and zone append operations requiring emulation
  * using zone write plugging.
@@ -1118,7 +1232,7 @@ static void blk_zone_wplug_handle_native_zone_append(struct bio *bio)
  * write plug. Otherwise, return false to let the submission path process
  * @bio normally.
  */
-bool blk_zone_plug_bio(struct bio *bio, unsigned int nr_segs)
+bool blk_zone_plug_bio(struct bio *bio, unsigned int nr_segs, int rq_cpu)
 {
 	struct block_device *bdev = bio->bi_bdev;
 
@@ -1151,14 +1265,11 @@ bool blk_zone_plug_bio(struct bio *bio, unsigned int nr_segs)
 		fallthrough;
 	case REQ_OP_WRITE:
 	case REQ_OP_WRITE_ZEROES:
-		return blk_zone_wplug_handle_write(bio, nr_segs);
+		return blk_zone_wplug_handle_write(bio, nr_segs, rq_cpu);
 	case REQ_OP_ZONE_RESET:
-		return blk_zone_wplug_handle_reset_or_finish(bio, 0);
 	case REQ_OP_ZONE_FINISH:
-		return blk_zone_wplug_handle_reset_or_finish(bio,
-						bdev_zone_sectors(bdev));
 	case REQ_OP_ZONE_RESET_ALL:
-		return blk_zone_wplug_handle_reset_all(bio);
+		return blk_zone_wplug_handle_zone_mgmt(bio);
 	default:
 		return false;
 	}
@@ -1182,6 +1293,16 @@ static void disk_zone_wplug_unplug_bio(struct gendisk *disk,
 	}
 
 	zwplug->flags &= ~BLK_ZONE_WPLUG_PLUGGED;
+
+	/*
+	 * zwplug->from_cpu must not change while one or more writes are pending
+	 * for the zone associated with zwplug. zwplug->ref is 2 when the plug
+	 * is unused (one reference taken when the plug was allocated and
+	 * another reference taken by the caller context). Reset
+	 * zwplug->from_cpu if no more writes are pending.
+	 */
+	if (refcount_read(&zwplug->ref) == 2)
+		zwplug->from_cpu = -1;
 
 	/*
 	 * If the zone is full (it was fully written or finished, or empty
@@ -1283,58 +1404,61 @@ static void blk_zone_wplug_bio_work(struct work_struct *work)
 {
 	struct blk_zone_wplug *zwplug =
 		container_of(work, struct blk_zone_wplug, bio_work);
+	bool pipeline_zwr = blk_pipeline_zwr(zwplug->disk->queue);
 	struct block_device *bdev;
 	unsigned long flags;
 	struct bio *bio;
-	bool prepared;
+	bool prepared, serialized;
 
-	/*
-	 * Submit the next plugged BIO. If we do not have any, clear
-	 * the plugged flag.
-	 */
-again:
-	spin_lock_irqsave(&zwplug->lock, flags);
-	bio = bio_list_pop(&zwplug->bio_list);
-	if (!bio) {
-		zwplug->flags &= ~BLK_ZONE_WPLUG_PLUGGED;
+	do {
+		/*
+		 * Submit the next plugged BIO. If we do not have any, clear
+		 * the plugged flag.
+		 */
+		spin_lock_irqsave(&zwplug->lock, flags);
+		bio = bio_list_pop(&zwplug->bio_list);
+		if (!bio) {
+			zwplug->flags &= ~BLK_ZONE_WPLUG_PLUGGED;
+			spin_unlock_irqrestore(&zwplug->lock, flags);
+			goto put_zwplug;
+		}
+
+		trace_blk_zone_wplug_bio(zwplug->disk->queue,
+					 zwplug->zone_no,
+					 bio->bi_iter.bi_sector,
+					 bio_sectors(bio));
+
+		prepared = blk_zone_wplug_prepare_bio(zwplug, bio);
 		spin_unlock_irqrestore(&zwplug->lock, flags);
-		goto put_zwplug;
-	}
 
-	trace_blk_zone_wplug_bio(zwplug->disk->queue, zwplug->zone_no,
-				 bio->bi_iter.bi_sector, bio_sectors(bio));
+		if (!prepared) {
+			blk_zone_wplug_bio_io_error(zwplug, bio);
+			continue;
+		}
 
-	prepared = blk_zone_wplug_prepare_bio(zwplug, bio);
-	spin_unlock_irqrestore(&zwplug->lock, flags);
+		bdev = bio->bi_bdev;
+		serialized = bio->bi_opf & REQ_ZONE_SERIALIZED;
 
-	if (!prepared) {
-		blk_zone_wplug_bio_io_error(zwplug, bio);
-		goto again;
-	}
+		/*
+		 * blk-mq devices will reuse the extra reference on the request
+		 * queue usage counter we took when the BIO was plugged, but the
+		 * submission path for BIO-based devices will not do that. So
+		 * drop this extra reference here.
+		 */
+		if (bdev_test_flag(bdev, BD_HAS_SUBMIT_BIO)) {
+			bdev->bd_disk->fops->submit_bio(bio);
+			blk_queue_exit(bdev->bd_disk->queue);
+		} else {
+			blk_mq_submit_bio(bio);
+		}
 
-	bdev = bio->bi_bdev;
-
-	/*
-	 * blk-mq devices will reuse the extra reference on the request queue
-	 * usage counter we took when the BIO was plugged, but the submission
-	 * path for BIO-based devices will not do that. So drop this extra
-	 * reference here.
-	 */
-	if (bdev_test_flag(bdev, BD_HAS_SUBMIT_BIO)) {
-		bdev->bd_disk->fops->submit_bio(bio);
-		blk_queue_exit(bdev->bd_disk->queue);
-	} else {
-		blk_mq_submit_bio(bio);
-	}
+		if (serialized)
+			break;
+	} while (pipeline_zwr);
 
 put_zwplug:
 	/* Drop the reference we took in disk_zone_wplug_schedule_bio_work(). */
 	disk_put_zone_wplug(zwplug);
-}
-
-static inline unsigned int disk_zone_wplugs_hash_size(struct gendisk *disk)
-{
-	return 1U << disk->zone_wplugs_hash_bits;
 }
 
 void disk_init_zone_resources(struct gendisk *disk)
@@ -1516,8 +1640,13 @@ static int disk_update_zone_resources(struct gendisk *disk,
 {
 	struct request_queue *q = disk->queue;
 	unsigned int nr_seq_zones, nr_conv_zones;
-	unsigned int pool_size;
+	unsigned int pool_size, memflags;
 	struct queue_limits lim;
+	int ret = 0;
+
+	lim = queue_limits_start_update(q);
+
+	memflags = blk_mq_freeze_queue(q);
 
 	disk->nr_zones = args->nr_zones;
 	disk->zone_capacity = args->zone_capacity;
@@ -1527,10 +1656,9 @@ static int disk_update_zone_resources(struct gendisk *disk,
 	if (nr_conv_zones >= disk->nr_zones) {
 		pr_warn("%s: Invalid number of conventional zones %u / %u\n",
 			disk->disk_name, nr_conv_zones, disk->nr_zones);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto unfreeze;
 	}
-
-	lim = queue_limits_start_update(q);
 
 	/*
 	 * Some devices can advertize zone resource limits that are larger than
@@ -1568,7 +1696,15 @@ static int disk_update_zone_resources(struct gendisk *disk,
 	}
 
 commit:
-	return queue_limits_commit_update_frozen(q, &lim);
+	ret = queue_limits_commit_update(q, &lim);
+
+unfreeze:
+	if (ret)
+		disk_free_zone_resources(disk);
+
+	blk_mq_unfreeze_queue(q, memflags);
+
+	return ret;
 }
 
 static int blk_revalidate_conv_zone(struct blk_zone *zone, unsigned int idx,
@@ -1693,6 +1829,16 @@ static int blk_revalidate_zone_cb(struct blk_zone *zone, unsigned int idx,
 		return -ENODEV;
 	}
 
+	/*
+	 * Require the zone size to be equal to zone capacity for
+	 * non-power-of-2 zoned devices.
+	 */
+	if (!is_power_of_2(zone->len) && zone->capacity < zone->len) {
+		pr_err("%s: Invalid zone capacity %lld for non power-of-2 zone size %lld",
+		       disk->disk_name, zone->capacity, zone->len);
+		return -ENODEV;
+	}
+
 	/* Check zone type */
 	switch (zone->type) {
 	case BLK_ZONE_TYPE_CONVENTIONAL:
@@ -1733,7 +1879,7 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 	sector_t zone_sectors = q->limits.chunk_sectors;
 	sector_t capacity = get_capacity(disk);
 	struct blk_revalidate_zone_args args = { };
-	unsigned int noio_flag;
+	unsigned int memflags, noio_flag;
 	int ret = -ENOMEM;
 
 	if (WARN_ON_ONCE(!blk_queue_is_zoned(q)))
@@ -1746,9 +1892,8 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 	 * Checks that the device driver indicated a valid zone size and that
 	 * the max zone append limit is set.
 	 */
-	if (!zone_sectors || !is_power_of_2(zone_sectors)) {
-		pr_warn("%s: Invalid non power of two zone size (%llu)\n",
-			disk->disk_name, zone_sectors);
+	if (!zone_sectors) {
+		pr_warn("%s: Invalid zone size\n", disk->disk_name);
 		return -ENODEV;
 	}
 
@@ -1757,7 +1902,7 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 	 * GFP_NOIO was specified.
 	 */
 	args.disk = disk;
-	args.nr_zones = (capacity + zone_sectors - 1) >> ilog2(zone_sectors);
+	args.nr_zones = div64_u64(capacity + zone_sectors - 1, zone_sectors);
 	noio_flag = memalloc_noio_save();
 	ret = disk_revalidate_zone_resources(disk, args.nr_zones);
 	if (ret) {
@@ -1783,20 +1928,14 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 		ret = -ENODEV;
 	}
 
-	/*
-	 * Set the new disk zone parameters only once the queue is frozen and
-	 * all I/Os are completed.
-	 */
 	if (ret > 0)
-		ret = disk_update_zone_resources(disk, &args);
-	else
-		pr_warn("%s: failed to revalidate zones\n", disk->disk_name);
-	if (ret) {
-		unsigned int memflags = blk_mq_freeze_queue(q);
+		return disk_update_zone_resources(disk, &args);
 
-		disk_free_zone_resources(disk);
-		blk_mq_unfreeze_queue(q, memflags);
-	}
+	pr_warn("%s: failed to revalidate zones\n", disk->disk_name);
+
+	memflags = blk_mq_freeze_queue(q);
+	disk_free_zone_resources(disk);
+	blk_mq_unfreeze_queue(q, memflags);
 
 	return ret;
 }
@@ -1852,6 +1991,7 @@ static void queue_zone_wplug_show(struct blk_zone_wplug *zwplug,
 	unsigned int zwp_zone_no, zwp_ref;
 	unsigned int zwp_bio_list_size;
 	unsigned long flags;
+	int from_cpu;
 
 	spin_lock_irqsave(&zwplug->lock, flags);
 	zwp_zone_no = zwplug->zone_no;
@@ -1859,10 +1999,13 @@ static void queue_zone_wplug_show(struct blk_zone_wplug *zwplug,
 	zwp_ref = refcount_read(&zwplug->ref);
 	zwp_wp_offset = zwplug->wp_offset;
 	zwp_bio_list_size = bio_list_size(&zwplug->bio_list);
+	from_cpu = zwplug->from_cpu;
 	spin_unlock_irqrestore(&zwplug->lock, flags);
 
-	seq_printf(m, "%u 0x%x %u %u %u\n", zwp_zone_no, zwp_flags, zwp_ref,
-		   zwp_wp_offset, zwp_bio_list_size);
+	seq_printf(m,
+		"Zone no: %u, flags: 0x%x, ref: %u, wp ofst: %u, pending BIO: %u, from_cpu: %d\n",
+		zwp_zone_no, zwp_flags, zwp_ref,
+		zwp_wp_offset, zwp_bio_list_size, from_cpu);
 }
 
 int queue_zone_wplugs_show(void *data, struct seq_file *m)

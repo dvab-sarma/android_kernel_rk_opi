@@ -13,6 +13,7 @@
 #include "f2fs.h"
 #include "iostat.h"
 #include <trace/events/f2fs.h>
+#include <trace/hooks/fs.h>
 
 static struct kmem_cache *bio_iostat_ctx_cache;
 static mempool_t *bio_iostat_ctx_pool;
@@ -34,6 +35,7 @@ int __maybe_unused iostat_info_seq_show(struct seq_file *seq, void *offset)
 {
 	struct super_block *sb = seq->private;
 	struct f2fs_sb_info *sbi = F2FS_SB(sb);
+	int i;
 
 	if (!sbi->iostat_enable)
 		return 0;
@@ -76,6 +78,12 @@ int __maybe_unused iostat_info_seq_show(struct seq_file *seq, void *offset)
 	IOSTAT_INFO_SHOW("fs node", FS_NODE_READ_IO);
 	IOSTAT_INFO_SHOW("fs meta", FS_META_READ_IO);
 
+	/* print read folio order stats */
+	seq_printf(seq, "%-23s", "fs read folio order:");
+	for (i = 0; i < NR_PAGE_ORDERS; i++)
+		seq_printf(seq, " %llu", sbi->iostat_read_folio_count[i]);
+	seq_putc(seq, '\n');
+
 	/* print other IOs */
 	seq_puts(seq, "[OTHER]\n");
 	IOSTAT_INFO_SHOW("fs discard", FS_DISCARD_IO);
@@ -113,6 +121,7 @@ static inline void __record_iostat_latency(struct f2fs_sb_info *sbi)
 static inline void f2fs_record_iostat(struct f2fs_sb_info *sbi)
 {
 	unsigned long long iostat_diff[NR_IO_TYPE];
+	unsigned long long read_folio_count_diff[NR_PAGE_ORDERS];
 	int i;
 	unsigned long flags;
 
@@ -133,9 +142,15 @@ static inline void f2fs_record_iostat(struct f2fs_sb_info *sbi)
 				sbi->prev_iostat_bytes[i];
 		sbi->prev_iostat_bytes[i] = sbi->iostat_bytes[i];
 	}
+
+	for (i = 0; i < NR_PAGE_ORDERS; i++) {
+		read_folio_count_diff[i] = sbi->iostat_read_folio_count[i] -
+					sbi->prev_iostat_read_folio_count[i];
+		sbi->prev_iostat_read_folio_count[i] = sbi->iostat_read_folio_count[i];
+	}
 	spin_unlock_irqrestore(&sbi->iostat_lock, flags);
 
-	trace_f2fs_iostat(sbi, iostat_diff);
+	trace_f2fs_iostat(sbi, iostat_diff, read_folio_count_diff);
 
 	__record_iostat_latency(sbi);
 }
@@ -151,6 +166,10 @@ void f2fs_reset_iostat(struct f2fs_sb_info *sbi)
 		sbi->iostat_bytes[i] = 0;
 		sbi->prev_iostat_bytes[i] = 0;
 	}
+	for (i = 0; i < NR_PAGE_ORDERS; i++) {
+		sbi->iostat_read_folio_count[i] = 0;
+		sbi->prev_iostat_read_folio_count[i] = 0;
+	}
 	spin_unlock_irq(&sbi->iostat_lock);
 
 	spin_lock_irq(&sbi->iostat_lat_lock);
@@ -163,6 +182,24 @@ static inline void __f2fs_update_iostat(struct f2fs_sb_info *sbi,
 {
 	sbi->iostat_bytes[type] += io_bytes;
 	sbi->iostat_count[type]++;
+}
+
+void f2fs_update_read_folio_count(struct f2fs_sb_info *sbi, struct folio *folio)
+{
+	unsigned int order = folio_order(folio);
+	unsigned long flags;
+
+	if (!sbi->iostat_enable)
+		return;
+
+	if (order >= NR_PAGE_ORDERS)
+		order = NR_PAGE_ORDERS - 1;
+
+	spin_lock_irqsave(&sbi->iostat_lock, flags);
+	sbi->iostat_read_folio_count[order]++;
+	spin_unlock_irqrestore(&sbi->iostat_lock, flags);
+
+	f2fs_record_iostat(sbi);
 }
 
 void f2fs_update_iostat(struct f2fs_sb_info *sbi, struct inode *inode,
@@ -241,7 +278,9 @@ void iostat_update_and_unbind_ctx(struct bio *bio)
 {
 	struct bio_iostat_ctx *iostat_ctx = bio->bi_private;
 	enum iostat_lat_type lat_type;
+	bool skip = false;
 
+	trace_android_vh_f2fs_iostat_update(iostat_ctx->sbi->sb, bio, &skip);
 	if (op_is_write(bio_op(bio))) {
 		lat_type = bio->bi_opf & REQ_SYNC ?
 				WRITE_SYNC_IO : WRITE_ASYNC_IO;
@@ -251,7 +290,8 @@ void iostat_update_and_unbind_ctx(struct bio *bio)
 		bio->bi_private = iostat_ctx->post_read_ctx;
 	}
 
-	__update_iostat_latency(iostat_ctx, lat_type);
+	if (!skip)
+		__update_iostat_latency(iostat_ctx, lat_type);
 	mempool_free(iostat_ctx, bio_iostat_ctx_pool);
 }
 
@@ -296,6 +336,12 @@ void f2fs_destroy_iostat_processing(void)
 
 int f2fs_init_iostat(struct f2fs_sb_info *sbi)
 {
+	/*
+	 * The f2fs_iostat tracepoint emits a fixed number of read folio order
+	 * buckets; make sure every order fits so none is silently dropped.
+	 */
+	BUILD_BUG_ON(NR_PAGE_ORDERS > F2FS_IOSTAT_RD_FOLIO_ORDERS);
+
 	/* init iostat info */
 	spin_lock_init(&sbi->iostat_lock);
 	spin_lock_init(&sbi->iostat_lat_lock);

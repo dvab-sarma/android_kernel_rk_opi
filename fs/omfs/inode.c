@@ -21,6 +21,7 @@
 MODULE_AUTHOR("Bob Copeland <me@bobcopeland.com>");
 MODULE_DESCRIPTION("OMFS (ReplayTV/Karma) Filesystem for Linux");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 struct buffer_head *omfs_bread(struct super_block *sb, sector_t block)
 {
@@ -508,6 +509,12 @@ static int omfs_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	if (sbi->s_sys_blocksize > PAGE_SIZE) {
 		printk(KERN_ERR "omfs: sysblock size (%d) is out of range\n",
+			sbi->s_sys_blocksize);
+		goto out_brelse_bh;
+	}
+
+	if (sbi->s_sys_blocksize < OMFS_DIR_START) {
+		printk(KERN_ERR "omfs: sysblock size (%d) is too small\n",
 			sbi->s_sys_blocksize);
 		goto out_brelse_bh;
 	}

@@ -284,6 +284,12 @@ static int memfd_add_seals(struct file *file, unsigned int seals)
 		goto unlock;
 	}
 
+	/*
+	 * SEAL_EXEC implies SEAL_WRITE, making W^X from the start.
+	 */
+	if (seals & F_SEAL_EXEC && inode->i_mode & 0111)
+		seals |= F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_WRITE|F_SEAL_FUTURE_WRITE;
+
 	if ((seals & F_SEAL_WRITE) && !(*file_seals & F_SEAL_WRITE)) {
 		error = mapping_deny_writable(file->f_mapping);
 		if (error)
@@ -295,12 +301,6 @@ static int memfd_add_seals(struct file *file, unsigned int seals)
 			goto unlock;
 		}
 	}
-
-	/*
-	 * SEAL_EXEC implies SEAL_WRITE, making W^X from the start.
-	 */
-	if (seals & F_SEAL_EXEC && inode->i_mode & 0111)
-		seals |= F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_WRITE|F_SEAL_FUTURE_WRITE;
 
 	*file_seals |= seals;
 	error = 0;
@@ -475,6 +475,10 @@ static struct file *alloc_file(const char *name, unsigned int flags)
 		return file;
 
 	inode = file_inode(file);
+
+	if (!(flags & MFD_HUGETLB))
+		SHMEM_I(inode)->flags |= SHMEM_FL_MEMFD;
+
 	err = security_inode_init_security_anon(inode,
 			&QSTR(MEMFD_ANON_NAME), NULL);
 	if (err) {

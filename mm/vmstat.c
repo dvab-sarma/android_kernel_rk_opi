@@ -28,6 +28,7 @@
 #include <linux/mm_inline.h>
 #include <linux/page_owner.h>
 #include <linux/sched/isolation.h>
+#include <linux/page_size_compat_defs.h>
 
 #include <trace/hooks/mm.h>
 #include "internal.h"
@@ -772,25 +773,25 @@ EXPORT_SYMBOL(dec_node_page_state);
 
 /*
  * Fold a differential into the global counters.
- * Returns the number of counters updated.
+ * Returns whether counters were updated.
  */
 static int fold_diff(int *zone_diff, int *node_diff)
 {
 	int i;
-	int changes = 0;
+	bool changed = false;
 
 	for (i = 0; i < NR_VM_ZONE_STAT_ITEMS; i++)
 		if (zone_diff[i]) {
 			atomic_long_add(zone_diff[i], &vm_zone_stat[i]);
-			changes++;
+			changed = true;
 	}
 
 	for (i = 0; i < NR_VM_NODE_STAT_ITEMS; i++)
 		if (node_diff[i]) {
 			atomic_long_add(node_diff[i], &vm_node_stat[i]);
-			changes++;
+			changed = true;
 	}
-	return changes;
+	return changed;
 }
 
 /*
@@ -807,16 +808,16 @@ static int fold_diff(int *zone_diff, int *node_diff)
  * with the global counters. These could cause remote node cache line
  * bouncing and will have to be only done when necessary.
  *
- * The function returns the number of global counters updated.
+ * The function returns whether global counters were updated.
  */
-static int refresh_cpu_vm_stats(bool do_pagesets)
+static bool refresh_cpu_vm_stats(bool do_pagesets)
 {
 	struct pglist_data *pgdat;
 	struct zone *zone;
 	int i;
 	int global_zone_diff[NR_VM_ZONE_STAT_ITEMS] = { 0, };
 	int global_node_diff[NR_VM_NODE_STAT_ITEMS] = { 0, };
-	int changes = 0;
+	bool changed = false;
 
 	for_each_populated_zone(zone) {
 		struct per_cpu_zonestat __percpu *pzstats = zone->per_cpu_zonestats;
@@ -840,7 +841,8 @@ static int refresh_cpu_vm_stats(bool do_pagesets)
 		if (do_pagesets) {
 			cond_resched();
 
-			changes += decay_pcp_high(zone, this_cpu_ptr(pcp));
+			if (decay_pcp_high(zone, this_cpu_ptr(pcp)))
+				changed = true;
 #ifdef CONFIG_NUMA
 			/*
 			 * Deal with draining the remote pageset of this
@@ -862,13 +864,13 @@ static int refresh_cpu_vm_stats(bool do_pagesets)
 			}
 
 			if (__this_cpu_dec_return(pcp->expire)) {
-				changes++;
+				changed = true;
 				continue;
 			}
 
 			if (__this_cpu_read(pcp->count)) {
 				drain_zone_pages(zone, this_cpu_ptr(pcp));
-				changes++;
+				changed = true;
 			}
 #endif
 		}
@@ -888,8 +890,9 @@ static int refresh_cpu_vm_stats(bool do_pagesets)
 		}
 	}
 
-	changes += fold_diff(global_zone_diff, global_node_diff);
-	return changes;
+	if (fold_diff(global_zone_diff, global_node_diff))
+		changed = true;
+	return changed;
 }
 
 /*
@@ -1787,22 +1790,22 @@ static void zoneinfo_show_print(struct seq_file *m, pg_data_t *pgdat,
 		   "\n        present  %lu"
 		   "\n        managed  %lu"
 		   "\n        cma      %lu",
-		   zone_page_state(zone, NR_FREE_PAGES),
-		   zone->watermark_boost,
-		   min_wmark_pages(zone),
-		   low_wmark_pages(zone),
-		   high_wmark_pages(zone),
-		   promo_wmark_pages(zone),
-		   zone->spanned_pages,
-		   zone->present_pages,
-		   zone_managed_pages(zone),
-		   zone_cma_pages(zone));
+		   __page_size_count(zone_page_state(zone, NR_FREE_PAGES)),
+		   __page_size_count(zone->watermark_boost),
+		   __page_size_count(min_wmark_pages(zone)),
+		   __page_size_count(low_wmark_pages(zone)),
+		   __page_size_count(high_wmark_pages(zone)),
+		   __page_size_count(promo_wmark_pages(zone)),
+		   __page_size_count(zone->spanned_pages),
+		   __page_size_count(zone->present_pages),
+		   __page_size_count(zone_managed_pages(zone)),
+		   __page_size_count(zone_cma_pages(zone)));
 
 	seq_printf(m,
-		   "\n        protection: (%ld",
-		   zone->lowmem_reserve[0]);
+		   "\n        protection: (%lu",
+		   __page_size_count(zone->lowmem_reserve[0]));
 	for (i = 1; i < ARRAY_SIZE(zone->lowmem_reserve); i++)
-		seq_printf(m, ", %ld", zone->lowmem_reserve[i]);
+		seq_printf(m, ", %lu", __page_size_count(zone->lowmem_reserve[i]));
 	seq_putc(m, ')');
 
 	/* If unpopulated, no other information is useful */
@@ -1836,11 +1839,11 @@ static void zoneinfo_show_print(struct seq_file *m, pg_data_t *pgdat,
 			   "\n              high_min: %i"
 			   "\n              high_max: %i",
 			   i,
-			   pcp->count,
-			   pcp->high,
-			   pcp->batch,
-			   pcp->high_min,
-			   pcp->high_max);
+			   (int)__page_size_count(pcp->count),
+			   (int)__page_size_count(pcp->high),
+			   (int)__page_size_count(pcp->batch),
+			   (int)__page_size_count(pcp->high_min),
+			   (int)__page_size_count(pcp->high_max));
 #ifdef CONFIG_SMP
 		pzstats = per_cpu_ptr(zone->per_cpu_zonestats, i);
 		seq_printf(m, "\n  vm stats threshold: %d",

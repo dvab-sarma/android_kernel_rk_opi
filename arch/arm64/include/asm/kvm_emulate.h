@@ -536,9 +536,9 @@ static inline u64 _vcpu_read_sys_reg(struct kvm_vcpu *vcpu, enum vcpu_sysreg reg
 static inline void _vcpu_write_sys_reg(struct kvm_vcpu *vcpu, enum vcpu_sysreg reg, u64 val)
 {
 	if (!is_nvhe_hyp_code())
-		vcpu_write_sys_reg(vcpu, val, SCTLR_EL1);
+		vcpu_write_sys_reg(vcpu, val, reg);
 	else
-		__vcpu_assign_sys_reg(vcpu, SCTLR_EL1, val);
+		__vcpu_assign_sys_reg(vcpu, reg, val);
 }
 
 static inline void kvm_vcpu_set_be(struct kvm_vcpu *vcpu)
@@ -553,7 +553,7 @@ static inline void kvm_vcpu_set_be(struct kvm_vcpu *vcpu)
 
 		sctlr = _vcpu_read_sys_reg(vcpu, r);
 		sctlr |= SCTLR_ELx_EE;
-		_vcpu_write_sys_reg(vcpu, sctlr, r);
+		_vcpu_write_sys_reg(vcpu, r, sctlr);
 	}
 }
 
@@ -761,6 +761,20 @@ static inline void kvm_reset_vcpu_psci(struct kvm_vcpu *vcpu,
 		kvm_vcpu_set_be(vcpu);
 
 	*vcpu_pc(vcpu) = target_pc;
+
+	/*
+	 * We may come from a state where either a PC update was
+	 * pending (SMC call resulting in PC being increpented to
+	 * skip the SMC) or a pending exception. Make sure we get
+	 * rid of all that, as this cannot be valid out of reset.
+	 *
+	 * Note that clearing the exception mask also clears PC
+	 * updates, but that's an implementation detail, and we
+	 * really want to make it explicit.
+	 */
+	vcpu_clear_flag(vcpu, PENDING_EXCEPTION);
+	vcpu_clear_flag(vcpu, EXCEPT_MASK);
+	vcpu_clear_flag(vcpu, INCREMENT_PC);
 	vcpu_set_reg(vcpu, 0, reset_state->r0);
 }
 

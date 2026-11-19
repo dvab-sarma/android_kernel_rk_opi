@@ -31,6 +31,7 @@
 #include <linux/static_call.h>
 #include <linux/memcontrol.h>
 #include <linux/cfi.h>
+#include <linux/android_kabi.h>
 #include <asm/rqspinlock.h>
 
 struct bpf_verifier_env;
@@ -184,6 +185,9 @@ struct bpf_map_ops {
 
 	/* bpf_iter info used to open a seq_file */
 	const struct bpf_iter_seq_info *iter_seq_info;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 enum {
@@ -335,6 +339,8 @@ struct bpf_map {
 	s64 __percpu *elem_count;
 	u64 cookie; /* write-once */
 	char *excl_prog_sha;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 static inline const char *btf_field_type_name(enum btf_field_type type)
@@ -629,6 +635,8 @@ struct bpf_map_dev_ops {
 	int (*map_update_elem)(struct bpf_offloaded_map *map,
 			       void *key, void *value, u64 flags);
 	int (*map_delete_elem)(struct bpf_offloaded_map *map, void *key);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct bpf_offloaded_map {
@@ -637,6 +645,8 @@ struct bpf_offloaded_map {
 	const struct bpf_map_dev_ops *dev_ops;
 	void *dev_priv;
 	struct list_head offloads;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 static inline struct bpf_offloaded_map *map_to_offmap(struct bpf_map *map)
@@ -933,6 +943,8 @@ struct bpf_func_proto {
 	};
 	int *ret_btf_id; /* return value btf_id */
 	bool (*allowed)(const struct bpf_prog *prog);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /* bpf_context is intentionally undefined structure. Pointer to bpf_context is
@@ -1089,6 +1101,7 @@ struct bpf_verifier_ops {
 	int (*btf_struct_access)(struct bpf_verifier_log *log,
 				 const struct bpf_reg_state *reg,
 				 int off, int size);
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct bpf_prog_offload_ops {
@@ -1104,6 +1117,7 @@ struct bpf_prog_offload_ops {
 	int (*prepare)(struct bpf_prog *prog);
 	int (*translate)(struct bpf_prog *prog);
 	void (*destroy)(struct bpf_prog *prog);
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct bpf_prog_offload {
@@ -1116,6 +1130,7 @@ struct bpf_prog_offload {
 	bool			opt_failed;
 	void			*jited_image;
 	u32			jited_len;
+	ANDROID_KABI_RESERVE(1);
 };
 
 /* The longest tracepoint has 12 args.
@@ -1305,6 +1320,7 @@ struct bpf_trampoline {
 	int progs_cnt[BPF_TRAMP_MAX];
 	/* Executable image of trampoline */
 	struct bpf_tramp_image *cur_image;
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct bpf_attach_target_info {
@@ -1336,6 +1352,7 @@ struct bpf_dispatcher {
 	struct static_call_key *sc_key;
 	void *sc_tramp;
 #endif
+	ANDROID_KABI_RESERVE(1);
 };
 
 #ifndef __bpfcall
@@ -1710,6 +1727,8 @@ struct bpf_prog_aux {
 		struct rcu_head	rcu;
 	};
 	struct bpf_stream stream[2];
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct bpf_prog {
@@ -1743,6 +1762,7 @@ struct bpf_prog {
 					    const struct bpf_insn *insn);
 	struct bpf_prog_aux	*aux;		/* Auxiliary fields */
 	struct sock_fprog_kern	*orig_prog;	/* Original BPF program */
+	ANDROID_KABI_RESERVE(1);
 	/* Instructions for interpreter */
 	union {
 		DECLARE_FLEX_ARRAY(struct sock_filter, insns);
@@ -1780,6 +1800,8 @@ struct bpf_link {
 	 * link's semantics is determined by target attach hook
 	 */
 	bool sleepable;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct bpf_link_ops {
@@ -1804,6 +1826,7 @@ struct bpf_link_ops {
 	int (*update_map)(struct bpf_link *link, struct bpf_map *new_map,
 			  struct bpf_map *old_map);
 	__poll_t (*poll)(struct file *file, struct poll_table_struct *pts);
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct bpf_tramp_link {
@@ -1929,6 +1952,8 @@ struct bpf_struct_ops {
 	struct module *owner;
 	const char *name;
 	struct btf_func_model func_models[BPF_STRUCT_OPS_MAX_NR_MEMBERS];
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /* Every member of a struct_ops type has an instance even a member is not
@@ -1954,6 +1979,7 @@ struct bpf_struct_ops_desc {
 
 	/* Collection of argument information for each member */
 	struct bpf_struct_ops_arg_info *arg_info;
+	ANDROID_KABI_RESERVE(1);
 };
 
 enum bpf_struct_ops_state {
@@ -2657,6 +2683,8 @@ struct bpf_iter_aux_info {
 		enum bpf_iter_task_type	type;
 		u32 pid;
 	} task;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 typedef int (*bpf_iter_attach_target_t)(struct bpf_prog *prog,
@@ -3200,6 +3228,11 @@ static inline void bpf_prog_report_arena_violation(bool write, unsigned long add
 }
 #endif /* CONFIG_BPF_SYSCALL */
 
+static inline bool bpf_net_capable(void)
+{
+	return capable(CAP_NET_ADMIN) || capable(CAP_SYS_ADMIN);
+}
+
 static __always_inline int
 bpf_probe_read_kernel_common(void *dst, u32 size, const void *unsafe_ptr)
 {
@@ -3289,7 +3322,7 @@ int sock_map_get_from_fd(const union bpf_attr *attr, struct bpf_prog *prog);
 int sock_map_prog_detach(const union bpf_attr *attr, enum bpf_prog_type ptype);
 int sock_map_update_elem_sys(struct bpf_map *map, void *key, void *value, u64 flags);
 int sock_map_bpf_prog_query(const union bpf_attr *attr,
-			    union bpf_attr __user *uattr);
+			    union bpf_attr __user *uattr, u32 uattr_size);
 int sock_map_link_create(const union bpf_attr *attr, struct bpf_prog *prog);
 
 void sock_map_unhash(struct sock *sk);
@@ -3385,7 +3418,8 @@ static inline int sock_map_update_elem_sys(struct bpf_map *map, void *key, void 
 }
 
 static inline int sock_map_bpf_prog_query(const union bpf_attr *attr,
-					  union bpf_attr __user *uattr)
+					  union bpf_attr __user *uattr,
+					  u32 uattr_size)
 {
 	return -EINVAL;
 }

@@ -20,7 +20,6 @@
  *
  * Other members are filled and used at runtime by the SMMU driver.
  * @base		Virtual address of SMMU registers
- * @ias			IPA size
  * @oas			PA size
  * @pgsize_bitmap	Supported page sizes
  * @lock		Lock to protect SMMU
@@ -32,7 +31,6 @@ struct hyp_arm_smmu_v3_device {
 	size_t			mmio_size;
 	void __iomem		*base;
 	u32			features;
-	unsigned long		ias;
 	unsigned long		oas;
 	unsigned long		pgsize_bitmap;
 	u32			lock;
@@ -53,6 +51,8 @@ struct hyp_arm_smmu_v3_device {
  * @host_ste_cfg	Host stream table config
  * @host_ste_base	Host stream table base
  * @gbpa		Last value of GBPA from the host
+ * @evtq_base		Host evtq base reg
+ * @priq_base		Host priq base reg
  */
 struct hyp_arm_smmu_v3_nested_device {
 	struct hyp_arm_smmu_v3_device common;
@@ -64,6 +64,11 @@ struct hyp_arm_smmu_v3_nested_device {
 	u64			host_ste_cfg;
 	u64			host_ste_base;
 	u32			gbpa;
+	unsigned long		evtq_base;
+	unsigned long		priq_base;
+	/* Order smmu.lock => host_mmu.lock => smmu.hw_lock */
+	u32			hw_lock;
+	bool			active;
 };
 
 extern size_t kvm_nvhe_sym(kvm_hyp_arm_smmu_v3_count);
@@ -71,6 +76,30 @@ extern size_t kvm_nvhe_sym(kvm_hyp_arm_smmu_v3_count);
 
 extern struct hyp_arm_smmu_v3_nested_device *kvm_nvhe_sym(kvm_hyp_arm_smmu_v3_smmus);
 #define kvm_hyp_arm_smmu_v3_smmus kvm_nvhe_sym(kvm_hyp_arm_smmu_v3_smmus)
+
+#ifdef __KVM_NVHE_HYPERVISOR__
+static inline hyp_spinlock_t *kvm_smmu_get_hw_lock(struct hyp_arm_smmu_v3_nested_device *smmu)
+{
+	/* See struct kvm_hyp_iommu */
+	BUILD_BUG_ON(sizeof(smmu->hw_lock) != sizeof(hyp_spinlock_t));
+	return (hyp_spinlock_t *)(&smmu->hw_lock);
+}
+
+static inline void kvm_smmu_hw_lock_init(struct hyp_arm_smmu_v3_nested_device *smmu)
+{
+	hyp_spin_lock_init(kvm_smmu_get_hw_lock(smmu));
+}
+
+static inline void kvm_smmu_hw_lock(struct hyp_arm_smmu_v3_nested_device *smmu)
+{
+	hyp_spin_lock(kvm_smmu_get_hw_lock(smmu));
+}
+
+static inline void kvm_smmu_hw_unlock(struct hyp_arm_smmu_v3_nested_device *smmu)
+{
+	hyp_spin_unlock(kvm_smmu_get_hw_lock(smmu));
+}
+#endif /* __KVM_NVHE_HYPERVISOR__ */
 #endif
 
 #if IS_ENABLED(CONFIG_ARM_SMMU_V3_PKVM_PV)

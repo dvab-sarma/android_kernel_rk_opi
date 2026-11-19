@@ -11,6 +11,7 @@
 #ifndef __ARM64_KVM_HOST_H__
 #define __ARM64_KVM_HOST_H__
 
+#include <linux/android_kabi.h>
 #include <linux/arm-smccc.h>
 #include <linux/bitmap.h>
 #include <linux/types.h>
@@ -110,7 +111,7 @@ static inline void *pop_hyp_memcache(struct kvm_hyp_memcache *mc,
 				     void *(*to_va)(phys_addr_t phys),
 				     unsigned long *order)
 {
-	phys_addr_t *p = to_va(mc->head & PAGE_MASK & PAGE_MASK);
+	phys_addr_t *p = to_va(mc->head & PAGE_MASK);
 
 	if (!mc->nr_pages)
 		return NULL;
@@ -133,29 +134,33 @@ static inline int __topup_hyp_memcache(struct kvm_hyp_memcache *mc,
 	while (mc->nr_pages < min_pages) {
 		phys_addr_t *p = alloc_fn(arg, order);
 
-		if (!p)
-			return -ENOMEM;
+		if (IS_ERR_OR_NULL(p))
+			return p ? PTR_ERR(p) : -ENOMEM;
+
 		push_hyp_memcache(mc, p, to_pa, order);
 	}
 
 	return 0;
 }
 
-static inline void __free_hyp_memcache(struct kvm_hyp_memcache *mc,
+static inline unsigned long __free_hyp_memcache(struct kvm_hyp_memcache *mc,
 				       void (*free_fn)(void *virt, void *arg, unsigned long order),
 				       void *(*to_va)(phys_addr_t phys),
 				       void *arg)
 {
-	unsigned long order;
+	unsigned long order, nr_pages = 0;
 	void *p;
 
 	while (mc->nr_pages) {
 		p = pop_hyp_memcache(mc, to_va, &order);
 		free_fn(p, arg, order);
+		nr_pages += 1UL << order;
 	}
+
+	return nr_pages;
 }
 
-void free_hyp_memcache(struct kvm_hyp_memcache *mc);
+unsigned long free_hyp_memcache(struct kvm_hyp_memcache *mc);
 int topup_hyp_memcache(struct kvm_hyp_memcache *mc, unsigned long min_pages, unsigned long order);
 int topup_hyp_memcache_gfp(struct kvm_hyp_memcache *mc, unsigned long min_pages,
 			   unsigned long order, gfp_t gfp);
@@ -257,6 +262,7 @@ struct kvm_s2_mmu {
 };
 
 struct kvm_arch_memory_slot {
+	u64 pkvm_pf_count;
 };
 
 /**
@@ -278,7 +284,10 @@ struct kvm_pinned_page {
 		struct rb_node		node;
 		struct list_head	list_node;
 	};
-	struct page		*page;
+	struct page		*_page;
+	struct file		*file;
+	struct kvm_memory_slot	*slot;
+	u64			pfn;
 	u64			ipa;
 	u64			__subtree_last;
 	u8			order;
@@ -291,6 +300,8 @@ struct kvm_pinned_page
 *kvm_pinned_pages_iter_next(struct kvm_pinned_page *ppage, u64 start, u64 end);
 void kvm_pinned_pages_remove(struct kvm_pinned_page *ppage,
 			     struct rb_root_cached *root);
+
+void pkvm_release_ppage(struct kvm_pinned_page *ppage, bool dirty);
 
 typedef unsigned int pkvm_handle_t;
 
@@ -402,6 +413,8 @@ struct kvm_arch {
 #define KVM_ARCH_FLAG_WRITABLE_IMP_ID_REGS		10
 	/* Guest has bought into the MMIO guard extension */
 #define KVM_ARCH_FLAG_MMIO_GUARD			11
+	/* No further ID register changes possible */
+#define KVM_ARCH_FLAG_ID_REGS_FINAL			12
 	unsigned long flags;
 
 	/* VM-wide vCPU feature set */
@@ -764,6 +777,7 @@ struct kvm_host_data {
 #define KVM_HOST_DATA_FLAG_VCPU_IN_HYP_CONTEXT		6
 #define KVM_HOST_DATA_FLAG_L1_VNCR_MAPPED		7
 #define KVM_HOST_DATA_FLAG_HAS_BRBE			8
+#define KVM_HOST_DATA_FLAG_PKVM_LATE_CPU		9
 	unsigned long flags;
 
 	struct kvm_cpu_context host_ctxt;
@@ -793,8 +807,10 @@ struct kvm_host_data {
 		struct kvm_guest_debug_arch regs;
 		/* Statistical profiling extension */
 		u64 pmscr_el1;
+		u64 pmblimitr_el1;
 		/* Self-hosted trace */
 		u64 trfcr_el1;
+		u64 trblimitr_el1;
 		/* Values of trap registers for the host before guest entry. */
 		u64 mdcr_el2;
 		u64 brbcr_el1;
@@ -843,21 +859,33 @@ struct vcpu_reset_state {
 
 struct vncr_tlb;
 
+enum {
+	KVM_HYP_LAST_REQ,
+	KVM_HYP_REQ_TYPE_MEM,
+	KVM_HYP_REQ_TYPE_MAP,
+	KVM_HYP_REQ_TYPE_SPLIT,
+	KVM_HYP_REQ_TYPE_HYP_ALLOC,
+	KVM_HYP_REQ_TYPE_MEM_IOMMU,
+	KVM_HYP_REQ_TYPE_MEM_HOST_S2,
+	__KVM_HYP_REQ_TYPE_MAX
+};
+
+#define KVM_HYP_REQ_SMCCC_ARG_SIZE_MAX \
+	(sizeof(struct arm_smccc_res) - offsetof(struct arm_smccc_res, a2) - 1)
+
 struct kvm_hyp_req {
-#define KVM_HYP_LAST_REQ	0
-#define KVM_HYP_REQ_TYPE_MEM	1
-#define KVM_HYP_REQ_TYPE_MAP	2
-#define KVM_HYP_REQ_TYPE_SPLIT	3
 	u8 type;
 	union {
 		struct {
-#define REQ_MEM_DEST_HYP_ALLOC		1
-#define REQ_MEM_DEST_VCPU_MEMCACHE	2
-#define REQ_MEM_DEST_HYP_IOMMU		3
+			u32	nr_pages;
+		} mem;
+		struct {
+#define REQ_MEM_DEST_VCPU_MEMCACHE	1
+#define REQ_MEM_DEST_HYP_IOMMU		2
 			u8	dest;
 			int	nr_pages;
 			int	sz_alloc; /* Size of the page. */
-		} mem;
+		} memcache;
 		struct {
 			unsigned long	guest_ipa;
 			size_t		size;
@@ -866,10 +894,77 @@ struct kvm_hyp_req {
 			unsigned long	guest_ipa;
 			size_t		size;
 		} split;
+		struct {
+			/* Helper for SMCCC encoding/decoding */
+			u8	args[KVM_HYP_REQ_SMCCC_ARG_SIZE_MAX];
+		} args;
 	};
 };
 
 #define KVM_HYP_REQ_MAX ((PAGE_SIZE >> 4) / sizeof(struct kvm_hyp_req))
+
+static inline size_t kvm_hyp_req_arg_size(u8 type)
+{
+	struct kvm_hyp_req *req;
+
+	switch (type) {
+	case KVM_HYP_LAST_REQ:
+		return 0;
+	case KVM_HYP_REQ_TYPE_MEM:
+		return sizeof(req->memcache);
+	case KVM_HYP_REQ_TYPE_MAP:
+		return sizeof(req->map);
+	case KVM_HYP_REQ_TYPE_SPLIT:
+		return sizeof(req->split);
+	case KVM_HYP_REQ_TYPE_HYP_ALLOC:
+	case KVM_HYP_REQ_TYPE_MEM_IOMMU:
+		return sizeof(req->mem);
+	case KVM_HYP_REQ_TYPE_MEM_HOST_S2:
+		return 0;
+	default:
+		WARN_ON(1);
+	}
+
+	return 0;
+}
+
+/* Encode the pending kvm_hyp_req type into the SMCCC args */
+static inline void hyp_req_to_smccc(struct kvm_cpu_context *host_ctxt, struct kvm_hyp_req *req)
+{
+	u8 *dst, type = req->type;
+	size_t size;
+
+	if (type == KVM_HYP_LAST_REQ || type >= __KVM_HYP_REQ_TYPE_MAX) {
+		host_ctxt->regs.regs[2] = 0;
+		return;
+	}
+
+	size = kvm_hyp_req_arg_size(type);
+	if (WARN_ON(size > KVM_HYP_REQ_SMCCC_ARG_SIZE_MAX))
+		return;
+
+	dst = (u8 *)&host_ctxt->regs.regs[2];
+	*dst = type;
+
+	memcpy(dst + 1, &req->args, size);
+}
+
+/* Return true if a kvm_hyp_req has been decoded from the SMCCC args */
+static inline bool smccc_to_hyp_req(struct kvm_hyp_req *req, struct arm_smccc_res *res)
+{
+	u8 *src = (u8 *)&res->a2;
+	u8 type = *src;
+
+	if (type == KVM_HYP_LAST_REQ || type >= __KVM_HYP_REQ_TYPE_MAX)
+		return false;
+
+	req->type = type;
+	memcpy(&req->args, src + 1, kvm_hyp_req_arg_size(type));
+
+	return true;
+}
+
+int handle_hyp_req(struct kvm_vcpu *vcpu, struct kvm_hyp_req *req, void *arg);
 
 /*
  * Hypervisor version of kvm_pinned_page. Typically stored in per-vCPU hyp_req
@@ -907,26 +1002,6 @@ next_kvm_hyp_pinned_page(struct kvm_hyp_req *page, struct kvm_hyp_pinned_page *p
 		return NULL;
 
 	return ppage;
-}
-
-/*
- * De-serialize request from SMCCC return.
- * See hyp-main.c for serialization.
- */
-/* Register a2. */
-#define	SMCCC_REQ_TYPE_MASK		GENMASK_ULL(7, 0)
-#define SMCCC_REQ_DEST_MASK		GENMASK_ULL(15, 8)
-/* Register a3. */
-#define SMCCC_REQ_NR_PAGES_MASK		GENMASK_ULL(31, 0)
-#define SMCCC_REQ_SZ_ALLOC_MASK		GENMASK_ULL(63, 32)
-
-static inline void hyp_reqs_smccc_decode(struct arm_smccc_res *res,
-					 struct kvm_hyp_req *req)
-{
-	req->type = FIELD_GET(SMCCC_REQ_TYPE_MASK, res->a2);
-	req->mem.dest = FIELD_GET(SMCCC_REQ_DEST_MASK, res->a2);
-	req->mem.nr_pages = FIELD_GET(SMCCC_REQ_NR_PAGES_MASK, res->a3);
-	req->mem.sz_alloc = FIELD_GET(SMCCC_REQ_SZ_ALLOC_MASK, res->a3);
 }
 
 struct kvm_vcpu_arch {
@@ -1260,6 +1335,9 @@ struct kvm_vcpu_arch {
 #define vcpu_has_ptrauth(vcpu)		false
 #endif
 
+#define kvm_id_regs_final(kvm)						\
+	test_bit(KVM_ARCH_FLAG_ID_REGS_FINAL, &(kvm)->arch.flags)
+
 #define vcpu_on_unsupported_cpu(vcpu)					\
 	vcpu_get_flag(vcpu, ON_UNSUPPORTED_CPU)
 
@@ -1553,7 +1631,43 @@ static inline bool kvm_system_needs_idmapped_vectors(void)
 	return cpus_have_final_cap(ARM64_SPECTRE_V3A);
 }
 
-void kvm_init_host_debug_data(void);
+static inline bool cpu_has_spe(u64 dfr0)
+{
+	return cpuid_feature_extract_unsigned_field(dfr0, ID_AA64DFR0_EL1_PMSVer_SHIFT) &&
+	       !(read_sysreg_s(SYS_PMBIDR_EL1) & PMBIDR_EL1_P);
+}
+
+static inline void kvm_init_host_debug_data(void)
+{
+	u64 dfr0 = read_sysreg(id_aa64dfr0_el1);
+
+	if (cpuid_feature_extract_signed_field(dfr0, ID_AA64DFR0_EL1_PMUVer_SHIFT) > 0)
+		*host_data_ptr(nr_event_counters) = FIELD_GET(ARMV8_PMU_PMCR_N,
+							      read_sysreg(pmcr_el0));
+
+	*host_data_ptr(debug_brps) = SYS_FIELD_GET(ID_AA64DFR0_EL1, BRPs, dfr0);
+	*host_data_ptr(debug_wrps) = SYS_FIELD_GET(ID_AA64DFR0_EL1, WRPs, dfr0);
+
+	if (cpu_has_spe(dfr0))
+		host_data_set_flag(HAS_SPE);
+
+	if (has_vhe())
+		return;
+
+	/* Check if we have BRBE implemented and available at the host */
+	if (cpuid_feature_extract_unsigned_field(dfr0, ID_AA64DFR0_EL1_BRBE_SHIFT))
+		host_data_set_flag(HAS_BRBE);
+
+	if (cpuid_feature_extract_unsigned_field(dfr0, ID_AA64DFR0_EL1_TraceFilt_SHIFT)) {
+		/* Force disable trace in protected mode in case of no TRBE */
+		if (is_protected_kvm_enabled())
+			host_data_set_flag(EL1_TRACING_CONFIGURED);
+
+		if (cpuid_feature_extract_unsigned_field(dfr0, ID_AA64DFR0_EL1_TraceBuffer_SHIFT) &&
+		    !(read_sysreg_s(SYS_TRBIDR_EL1) & TRBIDR_EL1_P))
+			host_data_set_flag(HAS_TRBE);
+	}
+}
 void kvm_debug_init_vhe(void);
 void kvm_vcpu_load_debug(struct kvm_vcpu *vcpu);
 void kvm_vcpu_put_debug(struct kvm_vcpu *vcpu);
@@ -1655,13 +1769,18 @@ static inline bool __vcpu_has_feature(const struct kvm_arch *ka, int feature)
 #define kvm_vcpu_has_feature(k, f)	__vcpu_has_feature(&(k)->arch, (f))
 #define vcpu_has_feature(v, f)	__vcpu_has_feature(&(v)->kvm->arch, (f))
 
-#define kvm_vcpu_initialized(v) vcpu_get_flag(vcpu, VCPU_INITIALIZED)
+#define kvm_vcpu_initialized(v) vcpu_get_flag(v, VCPU_INITIALIZED)
 
 int kvm_trng_call(struct kvm_vcpu *vcpu);
 #ifdef CONFIG_KVM
 extern phys_addr_t hyp_mem_base;
 extern phys_addr_t hyp_mem_size;
 void __init kvm_hyp_reserve(void);
+#ifdef CONFIG_CMA
+int __init pkvm_host_stage2_reserve(void);
+#else
+static inline int __init pkvm_host_stage2_reserve(void) { return 0; }
+#endif
 #else
 static inline void kvm_hyp_reserve(void) { }
 #endif
@@ -1768,7 +1887,8 @@ void kvm_set_vm_id_reg(struct kvm *kvm, u32 reg, u64 val);
 	(kvm_has_feat((k), ID_AA64MMFR3_EL1, S1PIE, IMP))
 
 #define kvm_has_s1poe(k)				\
-	(kvm_has_feat((k), ID_AA64MMFR3_EL1, S1POE, IMP))
+	(system_supports_poe() &&			\
+	 kvm_has_feat((k), ID_AA64MMFR3_EL1, S1POE, IMP))
 
 #define kvm_has_ras(k)					\
 	(kvm_has_feat((k), ID_AA64PFR0_EL1, RAS, IMP))
@@ -1874,12 +1994,18 @@ static inline long kvm_get_cap_for_kvm_ioctl(unsigned int ioctl, long *ext)
 }
 
 /* Allocator interface IDs. */
-#define HYP_ALLOC_MGT_HEAP_ID          0
-#define HYP_ALLOC_MGT_IOMMU_ID         1
+enum hyp_alloc_mgt_id {
+	__HYP_ALLOC_MGT_HEAP_ID_START__ = 0,
+	HYP_ALLOC_MGT_HEAP_ID = __HYP_ALLOC_MGT_HEAP_ID_START__,
+	HYP_ALLOC_MGT_IOMMU_ID,
+	HYP_ALLOC_MGT_HOSTS2_ID,
+	NR_ALLOC_MGT_IDS
+};
 
+unsigned long __pkvm_reclaim_hyp_alloc_mgt_id(enum hyp_alloc_mgt_id id, unsigned long nr_pages);
 unsigned long __pkvm_reclaim_hyp_alloc_mgt(unsigned long nr_pages);
-int __pkvm_topup_hyp_alloc_mgt_gfp(unsigned long id, unsigned long nr_pages,
-				   unsigned long sz_alloc, gfp_t gfp);
+unsigned long __pkvm_free_iommu_hyp_memcache(struct kvm_hyp_memcache *mc);
+int __pkvm_topup_hyp_iommu(unsigned long nr_pages, unsigned long sz_alloc, gfp_t gfp);
 
 #ifndef __KVM_NVHE_HYPERVISOR__
 struct kvm_iommu_driver {
@@ -1888,9 +2014,19 @@ struct kvm_iommu_driver {
 	int (*get_device_iommu_num_ids)(struct device *dev);
 	int (*get_device_iommu_id)(struct device *dev, u32 id,
 				   pkvm_handle_t *out_iommu, u32 *out_sid);
+	int (*get_iommu_endpoint)(struct of_phandle_args *iommu_spec, u64 *out_endpoint);
 
 	/* Private to core. */
 	struct list_head node;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+	ANDROID_KABI_RESERVE(5);
+	ANDROID_KABI_RESERVE(6);
+	ANDROID_KABI_RESERVE(7);
+	ANDROID_KABI_RESERVE(8);
 };
 
 struct kvm_iommu_ops;
@@ -1900,8 +2036,10 @@ int kvm_iommu_register_driver(struct kvm_iommu_driver *kern_ops,
 
 int kvm_iommu_init_driver(void);
 int kvm_iommu_register_hyp_ops(struct kvm_iommu_ops *hyp_ops, pkvm_handle_t *drv_id);
+int kvm_iommu_init_atomic_pool(struct kvm_hyp_memcache *atomic_mc);
 size_t kvm_iommu_pages(void);
 int kvm_get_iommu_id_by_of(struct device_node *np, pkvm_handle_t *out_id);
+int kvm_get_iommu_endpoint(struct of_phandle_args *iommu_spec, u64 *out_endpoint);
 #endif
 
 #ifndef __KVM_NVHE_HYPERVISOR__
@@ -1921,11 +2059,21 @@ int kvm_iommu_detach_dev(pkvm_handle_t iommu_id, pkvm_handle_t domain_id,
 int kvm_iommu_attach_dev(pkvm_handle_t iommu_id, pkvm_handle_t domain_id,
 			 unsigned int endpoint, unsigned int pasid,
 			 unsigned int ssid_bits, unsigned long flags);
+int kvm_iommu_attach_dev_nested(pkvm_handle_t iommu_id, pkvm_handle_t domain_id,
+				unsigned int endpoint, unsigned int pasid,
+				unsigned long flags, void *s1_desc_hva,
+				size_t s1_desc_size);
 int kvm_iommu_set_identity(pkvm_handle_t drv_id, pkvm_handle_t iommu,
-			   pkvm_handle_t dev, bool on);
+			   pkvm_handle_t dev, bool on, unsigned long flags);
 size_t kvm_iommu_map_sg(pkvm_handle_t domain_id, struct kvm_iommu_sg *sg,
 			unsigned long iova, unsigned int nent,
 			unsigned int prot, gfp_t gfp);
+int kvm_iommu_iotlb_inv_nested_domain(pkvm_handle_t domain_id, unsigned long iova, size_t size,
+				      size_t granule, bool leaf);
+int kvm_iommu_nested_cfg_sync(pkvm_handle_t drv_id, pkvm_handle_t iommu_id, void *cmd_desc_hva,
+			      size_t cmd_desc_size);
+int kvm_iommu_page_response(pkvm_handle_t drv_id, pkvm_handle_t iommu_id, unsigned int endpoint,
+			    unsigned int pasid, unsigned int grpid, unsigned int status_code);
 #endif
 /*
  * Unlike previous android versions, where we supported 1 << 16 domains,

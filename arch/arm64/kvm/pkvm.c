@@ -5,6 +5,8 @@
  */
 
 #include <linux/arm_ffa.h>
+#include <linux/cma.h>
+#include <linux/cpu.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/initrd.h>
@@ -13,7 +15,6 @@
 #include <linux/iommu.h>
 #include <linux/kmemleak.h>
 #include <linux/kvm_host.h>
-#include <asm/kvm_mmu.h>
 #include <linux/memblock.h>
 #include <linux/mutex.h>
 #include <linux/of_address.h>
@@ -64,38 +65,180 @@ phys_addr_t hyp_mem_size;
 extern struct pkvm_device *kvm_nvhe_sym(registered_devices);
 extern u32 kvm_nvhe_sym(registered_devices_nr);
 
+static enum {
+	PKVM_HOST_S2_CMA,
+	PKVM_HOST_S2_GCMA,
+	PKVM_HOST_S2_CARVEOUT,
+} host_s2_mode;
+
+#ifdef CONFIG_CMA
+static struct cma *host_s2_cma;
+static size_t host_s2_cma_keep;
+
+static int __init early_kvm_arm_host_s2_cfg(char *arg)
+{
+	char *opt;
+
+	if (!arg)
+		return -EINVAL;
+
+	while ((opt = strsep(&arg, ","))) {
+		if (!strcmp(opt, "carveout"))
+			host_s2_mode = PKVM_HOST_S2_CARVEOUT;
+		else if (!strcmp(opt, "cma"))
+			host_s2_mode = PKVM_HOST_S2_CMA;
+		else if (!strcmp(opt, "gcma"))
+			host_s2_mode = PKVM_HOST_S2_GCMA;
+		else if (!strncmp(opt, "keep=", 5))
+			host_s2_cma_keep = memparse(opt + 5, NULL);
+		else
+			return -EINVAL;
+	}
+
+	return 0;
+}
+early_param("kvm-arm.host_s2", early_kvm_arm_host_s2_cfg);
+
+/*
+ * kvm_hyp_reserve() being called way too early for CMA, this function allows to later-on reserve
+ * the host stage-2 memory pool for the hypervisor.
+ */
+int __init pkvm_host_stage2_reserve(void)
+{
+	if (!kvm_nvhe_sym(host_s2_cma_size))
+		return 0;
+
+	if (!cma_alloc(host_s2_cma, cma_get_size(host_s2_cma) >> PAGE_SHIFT, 0, true)) {
+		kvm_err("Failed to Reserve CMA memory for host stage-2\n");
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static void __init pkvm_host_stage2_drain(void)
+{
+	unsigned long reclaimed = 0;
+
+	if (kvm_nvhe_sym(host_s2_cma_size)) {
+		unsigned long max = ULONG_MAX;
+
+		if (host_s2_cma_keep) {
+			unsigned long reclaimable;
+
+			reclaimable = kvm_call_hyp_nvhe(__pkvm_hyp_alloc_mgt_reclaimable,
+							HYP_ALLOC_MGT_HOSTS2_ID);
+			max = reclaimable - (host_s2_cma_keep >> PAGE_SHIFT);
+			/* overflow */
+			if (max > reclaimable)
+				max = 0;
+		}
+
+		if (max)
+			reclaimed = __pkvm_reclaim_hyp_alloc_mgt_id(HYP_ALLOC_MGT_HOSTS2_ID, max);
+	}
+
+	kvm_info("Shrunk Hyp Reserved memory by %lu MiB\n", reclaimed >> (20 - PAGE_SHIFT));
+}
+
+static void *__host_stage2_alloc(void *arg, unsigned long order)
+{
+	gfp_t gfp = (gfp_t)(uintptr_t)arg;
+	struct page *p;
+
+	p = __cma_alloc(host_s2_cma, 1, 0, gfp);
+	if (!p)
+		return NULL;
+
+	return page_to_virt(p);
+}
+
+static void __host_stage2_free(void *virt, void *arg, unsigned long order)
+{
+	WARN_ON(!cma_release(host_s2_cma, virt_to_page(virt), 1));
+}
+
+int pkvm_host_stage2_topup(gfp_t gfp)
+{
+	struct kvm_hyp_memcache mc;
+	int ret = -EINVAL;
+
+	if (!gfpflags_allow_blocking(gfp) && host_s2_mode != PKVM_HOST_S2_GCMA)
+		goto err;
+
+	if (host_s2_mode == PKVM_HOST_S2_GCMA)
+		/*
+		 * GCMA allows host stage-2 topup in atomic context which can
+		 * happen on systems using IOMMU domains. Keeping track of the context
+		 * is cumbersome with nested hypervisor requests. So instead enforce the
+		 * atomic context when GCMA used.
+		 */
+		gfp |= GFP_ATOMIC;
+
+	init_hyp_memcache(&mc);
+	ret = __topup_hyp_memcache(&mc, 3, __host_stage2_alloc, kvm_host_pa,
+				   (void *)(uintptr_t)(gfp | __GFP_NOWARN), 0);
+	if (ret && !mc.nr_pages)
+		return ret;
+
+	ret = __pkvm_topup_hyp_alloc_mgt_mc(HYP_ALLOC_MGT_HOSTS2_ID, &mc);
+	if (ret)
+		__free_hyp_memcache(&mc, __host_stage2_free, kvm_host_va, NULL);
+
+err:
+	return WARN_ON_ONCE(ret);
+}
+EXPORT_SYMBOL(pkvm_host_stage2_topup);
+#else
+static void __host_stage2_free(void *virt, void *arg, unsigned long order) { WARN_ON(1); }
+static void __init pkvm_host_stage2_drain(void) { }
+#endif
+
+static int __init add_hyp_memblock_region(const struct memblock_region *reg)
+{
+	if (*hyp_memblock_nr_ptr >= HYP_MEMBLOCK_REGIONS)
+		return -ENOMEM;
+
+	hyp_memory[*hyp_memblock_nr_ptr] = *reg;
+	(*hyp_memblock_nr_ptr)++;
+
+	return 0;
+}
+
 static int __init register_memblock_regions(void)
 {
+	struct memblock_region pvmfw_reg = {
+		.base	= pvmfw_base,
+		.size	= pvmfw_size,
+		.flags	= MEMBLOCK_NOMAP,
+	};
 	struct memblock_region *reg;
-	bool pvmfw_in_mem = false;
+	bool pvmfw_registered = !pvmfw_size;
+	int ret;
 
 	for_each_mem_region(reg) {
-		if (*hyp_memblock_nr_ptr >= HYP_MEMBLOCK_REGIONS)
-			return -ENOMEM;
+		/* EL2 binary-searches hyp_memory, so insert pvmfw in address order. */
+		if (!pvmfw_registered && pvmfw_base < reg->base + reg->size) {
+			if (memblock_addrs_overlap(reg->base, reg->size, pvmfw_base, pvmfw_size)) {
+				/* If the pvmfw region overlaps a memblock, it must be a subset */
+				if (pvmfw_base < reg->base ||
+				    (pvmfw_base + pvmfw_size) > (reg->base + reg->size))
+					return -EINVAL;
+			} else {
+				ret = add_hyp_memblock_region(&pvmfw_reg);
+				if (ret)
+					return ret;
+			}
+			pvmfw_registered = true;
+		}
 
-		hyp_memory[*hyp_memblock_nr_ptr] = *reg;
-		(*hyp_memblock_nr_ptr)++;
-
-		if (!pvmfw_size || pvmfw_in_mem ||
-			!memblock_addrs_overlap(reg->base, reg->size, pvmfw_base, pvmfw_size))
-			continue;
-		/* If the pvmfw region overlaps a memblock, it must be a subset */
-		if (pvmfw_base < reg->base || (pvmfw_base + pvmfw_size) > (reg->base + reg->size))
-			return -EINVAL;
-		pvmfw_in_mem = true;
+		ret = add_hyp_memblock_region(reg);
+		if (ret)
+			return ret;
 	}
 
-	if (pvmfw_size && !pvmfw_in_mem) {
-		if (*hyp_memblock_nr_ptr >= HYP_MEMBLOCK_REGIONS)
-			return -ENOMEM;
-
-		hyp_memory[*hyp_memblock_nr_ptr] = (struct memblock_region) {
-			.base   = pvmfw_base,
-			.size   = pvmfw_size,
-			.flags  = MEMBLOCK_NOMAP,
-		};
-		(*hyp_memblock_nr_ptr)++;
-	}
+	if (!pvmfw_registered)
+		return add_hyp_memblock_region(&pvmfw_reg);
 
 	return 0;
 }
@@ -165,7 +308,7 @@ static int __init register_moveable_regions(void)
 {
 	struct memblock_region *reg;
 	struct device_node *np;
-	int i = 0, ret = 0, idx = 0;
+	int i = 0, ret = 0, idx;
 
 	for_each_mem_region(reg) {
 		if (i >= PKVM_NR_MOVEABLE_REGS)
@@ -186,6 +329,7 @@ static int __init register_moveable_regions(void)
 	for_each_compatible_node(np, NULL, PKVM_DEVICE_ASSIGN_COMPAT) {
 		struct of_phandle_args args;
 
+		idx = 0;
 		while (!of_parse_phandle_with_fixed_args(np, "devices", 1, idx, &args)) {
 			idx++;
 			ret = register_moveable_fdt_resource(args.np, PKVM_MREG_ASSIGN_MMIO);
@@ -210,11 +354,17 @@ static int __init early_hyp_lm_size_mb_cfg(char *arg)
 }
 early_param("kvm-arm.hyp_lm_size_mb", early_hyp_lm_size_mb_cfg);
 
-DEFINE_STATIC_KEY_FALSE(kvm_ffa_unmap_on_lend);
+static int __init early_ffa_max_nr_constituents(char *arg)
+{
+	return kstrtoul(arg, 10, &kvm_nvhe_sym(ffa_max_nr_constituents));
+}
+
+early_param("kvm-arm.ffa_max_nr_constituents", early_ffa_max_nr_constituents);
 
 void __init kvm_hyp_reserve(void)
 {
 	u64 hyp_mem_pages = 0;
+	phys_addr_t align;
 	int ret;
 
 	if (!is_hyp_mode_available() || is_kernel_in_hyp_mode())
@@ -238,37 +388,60 @@ void __init kvm_hyp_reserve(void)
 	}
 
 	hyp_mem_pages += hyp_s1_pgtable_pages();
-	hyp_mem_pages += host_s2_pgtable_pages();
+	hyp_mem_pages += host_s2_mmio_pgtable_pages();
 	hyp_mem_pages += hyp_vm_table_pages();
+	hyp_mem_pages += host_s2_pgtable_pages();
 	hyp_mem_pages += hyp_vmemmap_pages(STRUCT_HYP_PAGE_SIZE);
 	hyp_mem_pages += pkvm_selftest_pages();
 	hyp_mem_pages += hyp_ffa_proxy_pages();
-	if (static_branch_unlikely(&kvm_ffa_unmap_on_lend))
-		hyp_mem_pages += KVM_FFA_SPM_HANDLE_NR_PAGES;
-
 	hyp_mem_pages++; /* hyp_ppages */
-
 	hyp_mem_pages += kvm_iommu_pages();
+
+	hyp_mem_size = hyp_mem_pages * PAGE_SIZE;
 
 	/*
 	 * Try to allocate a PMD-aligned region to reduce TLB pressure once
 	 * this is unmapped from the host stage-2, and fallback to PAGE_SIZE.
 	 */
-	hyp_mem_size = hyp_mem_pages << PAGE_SHIFT;
-	hyp_mem_base = memblock_phys_alloc(ALIGN(hyp_mem_size, PMD_SIZE),
-					   PMD_SIZE);
-	if (!hyp_mem_base)
-		hyp_mem_base = memblock_phys_alloc(hyp_mem_size, PAGE_SIZE);
-	else
-		hyp_mem_size = ALIGN(hyp_mem_size, PMD_SIZE);
+#ifdef CONFIG_CMA
+	align = max(PMD_SIZE, CMA_MIN_ALIGNMENT_BYTES);
+#else
+	align = PMD_SIZE;
+#endif
 
+again:
+	hyp_mem_base = memblock_phys_alloc(ALIGN(hyp_mem_size, align), align);
 	if (!hyp_mem_base) {
-		kvm_err("Failed to reserve hyp memory\n");
+		align = PAGE_SIZE;
+		goto again;
+	}
+
+	hyp_mem_size = ALIGN(hyp_mem_size, align);
+	kvm_info("Reserved %lld MiB at 0x%llx\n", hyp_mem_size >> 20, hyp_mem_base);
+
+#ifdef CONFIG_CMA
+	if (host_s2_mode == PKVM_HOST_S2_CARVEOUT)
+		return;
+
+	/*
+	 * Even though only the host s2 is reclaimable, cover the entire
+	 * carveout with a CMA region as it has the same alignment requirements.
+	 */
+	ret = cma_init_reserved_mem(hyp_mem_base, hyp_mem_size, 0, "pkvm,host_s2_cma",
+				    &host_s2_cma, host_s2_mode == PKVM_HOST_S2_GCMA);
+	if (ret) {
+		kvm_err("Failed to init CMA region for host stage-2 (%d)\n", ret);
 		return;
 	}
 
-	kvm_info("Reserved %lld MiB at 0x%llx\n", hyp_mem_size >> 20,
-		 hyp_mem_base);
+	/* Place the reclaimable host stage-2 region at the end of the carveout */
+	kvm_nvhe_sym(host_s2_cma_base) = hyp_mem_base +
+					((hyp_mem_pages - host_s2_pgtable_pages()) * PAGE_SIZE);
+	kvm_nvhe_sym(host_s2_cma_size) = hyp_mem_size - (kvm_nvhe_sym(host_s2_cma_base) -
+					hyp_mem_base);
+
+	hyp_mem_size = kvm_nvhe_sym(host_s2_cma_base) - hyp_mem_base;
+#endif
 }
 
 static void __pkvm_finalize_destroy_hyp_vm(struct kvm *kvm)
@@ -534,15 +707,22 @@ static int pkvm_register_device(struct of_phandle_args *args,
 	while (!of_parse_phandle_with_args(np, "iommus",
 					   "#iommu-cells",
 					   j, &iommu_spec)) {
-		if (iommu_spec.args_count != 1) {
-			kvm_err("[Devices] Unsupported binding for %s, expected <&iommu id>",
-				np->full_name);
-			return -EINVAL;
-		}
+		u64 endpoint;
 
 		if (j >= PKVM_DEVICE_MAX_RESOURCE) {
 			of_node_put(iommu_spec.np);
 			return -E2BIG;
+		}
+
+		if (iommu_spec.args_count != 1) {
+			/* Unknown binding, check if the driver knows it. */
+			if (kvm_get_iommu_endpoint(&iommu_spec, &endpoint)) {
+				kvm_err("[Devices] Unsupported binding for %s, expected <&iommu id>",
+					np->full_name);
+				return -EINVAL;
+			}
+		} else {
+			endpoint = iommu_spec.args[0];
 		}
 
 		ret = kvm_get_iommu_id_by_of(iommu_spec.np, &iommu_id);
@@ -550,7 +730,7 @@ static int pkvm_register_device(struct of_phandle_args *args,
 			return ret;
 
 		dev->iommus[j].id = iommu_id;
-		dev->iommus[j].endpoint = iommu_spec.args[0];
+		dev->iommus[j].endpoint = endpoint;
 		of_node_put(iommu_spec.np);
 		j++;
 	}
@@ -586,7 +766,7 @@ static int pkvm_init_devices(void)
 
 	dev_sz = PAGE_ALIGN(size_mul(sizeof(struct pkvm_device), dev_cnt));
 
-	dev_base = alloc_pages_exact(dev_sz, GFP_KERNEL_ACCOUNT);
+	dev_base = alloc_pages_exact(dev_sz, GFP_KERNEL_ACCOUNT | __GFP_ZERO);
 
 	if (!dev_base)
 		return -ENOMEM;
@@ -609,7 +789,8 @@ static int pkvm_init_devices(void)
 
 	kvm_nvhe_sym(registered_devices_nr) = dev_cnt;
 	kvm_nvhe_sym(registered_devices) = dev_base;
-	return ret;
+
+	return kvm_call_hyp_nvhe(__pkvm_devices_init);
 
 out_free:
 	free_pages_exact(dev_base, dev_sz);
@@ -627,12 +808,29 @@ static void __init _kvm_host_prot_finalize(void *arg)
 static int __init pkvm_drop_host_privileges(void)
 {
 	int ret = 0;
+	int cpu;
+
+	/*
+	 * Prevent races between this function and the CPU hotplug path for
+	 * kvm_hyp_vector and kvm_protected_mode_initialized.
+
+	 * After this point, new CPUs will most likely use HYP_VECTOR_INDIRECT.
+	 */
+	guard(cpus_read_lock)();
+
+	for_each_possible_cpu(cpu) {
+		if (!cpu_online(cpu))
+			set_bit(KVM_HOST_DATA_FLAG_PKVM_LATE_CPU,
+				&per_cpu_ptr_hyp_sym(kvm_host_data, cpu)->flags);
+	}
+
+	kvm_call_hyp_nvhe(__pkvm_late_cpus_finalize);
 
 	/*
 	 * Flip the static key upfront as that may no longer be possible
 	 * once the host stage 2 is installed.
 	 */
-	static_branch_enable(&kvm_protected_mode_initialized);
+	static_branch_enable_cpuslocked(&kvm_protected_mode_initialized);
 	on_each_cpu(_kvm_host_prot_finalize, &ret, 1);
 	return ret;
 }
@@ -665,10 +863,6 @@ static int __init finalize_pkvm(void)
 		pkvm_firmware_rmem_clear();
 	}
 
-	ret = kvm_call_hyp_nvhe(__pkvm_devices_init);
-	if (ret)
-		pr_warn("Assignable devices failed to initialize in the hypervisor %d", ret);
-
 	/*
 	 * Exclude HYP sections from kmemleak so that they don't get peeked
 	 * at, which would end badly once inaccessible.
@@ -676,9 +870,11 @@ static int __init finalize_pkvm(void)
 	kmemleak_free_part(__hyp_bss_start, __hyp_bss_end - __hyp_bss_start);
 	kmemleak_free_part(__hyp_data_start, __hyp_data_end - __hyp_data_start);
 	kmemleak_free_part(__hyp_rodata_start, __hyp_rodata_end - __hyp_rodata_start);
-	kmemleak_free_part_phys(hyp_mem_base, hyp_mem_size);
+	kmemleak_free_part_phys(hyp_mem_base, hyp_mem_size + kvm_nvhe_sym(host_s2_cma_size));
 
 	kvm_s2_ptdump_host_create_debugfs();
+
+	pkvm_host_stage2_drain();
 
 	ret = pkvm_drop_host_privileges();
 	if (ret) {
@@ -708,6 +904,7 @@ int pkvm_enable_smc_forwarding(struct file *kvm_file)
 
 	return 0;
 }
+EXPORT_SYMBOL(pkvm_enable_smc_forwarding);
 
 static int __init pkvm_firmware_rmem_err(struct reserved_mem *rmem,
 					 const char *reason)
@@ -904,7 +1101,7 @@ int pkvm_pgtable_stage2_init(struct kvm_pgtable *pgt, struct kvm_s2_mmu *mmu,
 
 void pkvm_host_reclaim_page(struct kvm *kvm, phys_addr_t ipa)
 {
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = kvm->mm;
 	struct kvm_pinned_page *ppage;
 
 	write_lock(&kvm->mmu_lock);
@@ -913,6 +1110,7 @@ void pkvm_host_reclaim_page(struct kvm *kvm, phys_addr_t ipa)
 	if (ppage) {
 		WARN_ON(ppage->order);
 		kvm_pinned_pages_remove(ppage, &kvm->arch.pkvm.pinned_pages);
+		ppage->slot->arch.pkvm_pf_count--;
 	}
 	write_unlock(&kvm->mmu_lock);
 
@@ -921,7 +1119,7 @@ void pkvm_host_reclaim_page(struct kvm *kvm, phys_addr_t ipa)
 		return;
 
 	account_locked_vm(mm, 1, false);
-	unpin_user_pages_dirty_lock(&ppage->page, 1, true);
+	pkvm_release_ppage(ppage, true);
 	kfree(ppage);
 }
 
@@ -929,7 +1127,7 @@ static int __pkvm_pgtable_stage2_unmap(struct kvm_pgtable *pgt, u64 start, u64 e
 {
 	struct kvm *kvm = kvm_s2_mmu_to_kvm(pgt->mmu);
 	pkvm_handle_t handle = kvm->arch.pkvm.handle;
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = kvm->mm;
 	struct kvm_pinned_page *ppage;
 	struct pkvm_mapping *mapping;
 	u64 pages, nr_busy;
@@ -970,9 +1168,10 @@ retry:
 			continue;
 		}
 		WARN_ON(ret);
-		unpin_user_pages_dirty_lock(&ppage->page, 1, true);
+		pkvm_release_ppage(ppage, true);
 		account_locked_vm(mm, 1 << ppage->order, false);
 		kvm_pinned_pages_remove(ppage, &kvm->arch.pkvm.pinned_pages);
+		ppage->slot->arch.pkvm_pf_count--;
 		kfree(ppage);
 		ppage = next;
 	}
@@ -1014,6 +1213,7 @@ int pkvm_pgtable_stage2_map(struct kvm_pgtable *pgt, u64 addr, u64 size,
 	struct kvm_hyp_memcache *cache = mc;
 	u64 gfn = addr >> PAGE_SHIFT;
 	u64 pfn = phys >> PAGE_SHIFT;
+	struct arm_smccc_res res;
 	int ret;
 
 	if (size != PAGE_SIZE && size != PMD_SIZE)
@@ -1038,9 +1238,24 @@ int pkvm_pgtable_stage2_map(struct kvm_pgtable *pgt, u64 addr, u64 size,
 		mapping = NULL;
 	}
 
-	ret = kvm_call_hyp_nvhe(__pkvm_host_map_guest, pfn, gfn, size / PAGE_SIZE, prot);
-	if (WARN_ON(ret))
+	arm_smccc_1_1_hvc(KVM_HOST_SMCCC_FUNC(__pkvm_host_map_guest),
+			  pfn, gfn, size / PAGE_SIZE, prot, &res);
+	WARN_ON(res.a0 != SMCCC_RET_SUCCESS);
+	ret = res.a1;
+	if (WARN_ON(ret && ret > -EBADHANDLE))
 		return ret;
+
+	/*
+	 * Pending kvm_hyp_req in SMCCC. Releasing the write lock for the
+	 * handling is fine: The vCPU will have to fault again to retry.
+	 */
+	if (ret) {
+		write_unlock(&kvm->mmu_lock);
+		ret = __pkvm_handle_smccc_req(&res, NULL);
+		write_lock(&kvm->mmu_lock);
+
+		return ret ?: -EAGAIN;
+	}
 
 	swap(mapping, cache->mapping);
 	mapping->gfn = gfn;
@@ -1088,6 +1303,9 @@ int pkvm_pgtable_stage2_flush(struct kvm_pgtable *pgt, u64 addr, u64 size)
 {
 	struct kvm *kvm = kvm_s2_mmu_to_kvm(pgt->mmu);
 	struct pkvm_mapping *mapping;
+
+	if (cpus_have_final_cap(ARM64_HAS_STAGE2_FWB) && !(pgt->flags & KVM_PGTABLE_S2_NOFWB))
+		return 0;
 
 	lockdep_assert_held(&kvm->mmu_lock);
 	for_each_mapping_in_range_safe(pgt, addr, addr + size, mapping)
@@ -1338,27 +1556,6 @@ static struct module *pkvm_el2_mod_to_module(struct pkvm_el2_module *hyp_mod)
 	return container_of(arch, struct module, arch);
 }
 
-#ifdef CONFIG_PKVM_STACKTRACE
-unsigned long pkvm_el2_mod_kern_va(unsigned long addr)
-{
-	struct pkvm_el2_module *mod;
-
-	list_for_each_entry(mod, &pkvm_modules, node) {
-		unsigned long hyp_va = (unsigned long)mod->hyp_va;
-		size_t len = (unsigned long)mod->sections.end -
-			     (unsigned long)mod->sections.start;
-
-		if (addr >= hyp_va && addr < (hyp_va + len))
-			return (unsigned long)mod->sections.start +
-				(addr - hyp_va);
-	}
-
-	return 0;
-}
-#else
-unsigned long pkvm_el2_mod_kern_va(unsigned long addr) { return 0; }
-#endif
-
 static struct pkvm_el2_module *pkvm_el2_mod_lookup_symbol(const char *name,
 							  unsigned long *addr)
 {
@@ -1393,7 +1590,7 @@ static int pkvm_reloc_imported_symbol(struct pkvm_el2_module *importer,
 {
 	u32 insn = le32_to_cpu(*sym->rela_pos);
 	unsigned long hyp_orig, hyp_dst;
-	u64 imm, offset;
+	s64 offset;
 
 	if (!within_pkvm_module_section(&importer->text,
 					(unsigned long)sym->rela_pos)) {
@@ -1412,27 +1609,17 @@ static int pkvm_reloc_imported_symbol(struct pkvm_el2_module *importer,
 
 	hyp_dst = __pkvm_el2_mod_va(exporter, (void *)sym_addr);
 	hyp_orig = __pkvm_el2_mod_va(importer, (void *)sym->rela_pos);
-
-	/*
-	 * Module hyp VAs are allocated going upward. The exporter being loaded
-	 * before the importer, the destination address MUST be lower than the
-	 * origin.
-	 */
-	if (WARN_ON(hyp_dst > hyp_orig))
-		return -EINVAL;
-
-	offset = hyp_orig - hyp_dst;
+	offset = (s64)hyp_dst - (s64)hyp_orig;
 
 	/* imm26 is 2's complement and equals to offset / 4 */
 	offset >>= 2;
-	if (offset > BIT(25)) {
-		pr_warn("Exported symbol %s is too far for the relocation in module %s\n",
-			sym->name, pkvm_el2_mod_to_module(importer)->name);
+	if (offset < -(s64)BIT(25) || offset >= (s64)BIT(25)) {
+		pr_warn("pKVM symbol %s@0x%lx is too far to branch from 0x%lx [%s]\n",
+			sym->name, hyp_dst, hyp_orig, pkvm_el2_mod_to_module(importer)->name);
 		return -ERANGE;
 	}
 
-	imm = -offset;
-	insn = aarch64_insn_encode_immediate(AARCH64_INSN_IMM_26, insn, imm);
+	insn = aarch64_insn_encode_immediate(AARCH64_INSN_IMM_26, insn, offset);
 
 	return aarch64_insn_patch_text_nosync((void *)sym->rela_pos, insn);
 }
@@ -1594,6 +1781,77 @@ static void pkvm_module_kmemleak(struct module *this,
 	kmemleak_scan_area(start, end - start, GFP_KERNEL);
 }
 
+#define PKVM_EL2_MOD_DIRECT_RANGE	SZ_128M
+
+static unsigned long mod_direct_kern_base;
+static unsigned long mod_direct_hyp_base;
+
+unsigned long pkvm_el2_mod_kern_va(unsigned long addr)
+{
+	struct pkvm_el2_module *mod;
+
+	/* Fast lookup into the direct range */
+	if (mod_direct_hyp_base &&
+		addr >= mod_direct_hyp_base &&
+		addr < mod_direct_hyp_base + PKVM_EL2_MOD_DIRECT_RANGE)
+		return mod_direct_kern_base + (addr - mod_direct_hyp_base);
+
+	list_for_each_entry(mod, &pkvm_modules, node) {
+		unsigned long hyp_va = (unsigned long)mod->hyp_va;
+		size_t len = (unsigned long)mod->sections.end -
+				 (unsigned long)mod->sections.start;
+
+		if (addr >= hyp_va && addr < (hyp_va + len))
+			return (unsigned long)mod->sections.start +
+				(addr - hyp_va);
+	}
+
+	return 0;
+}
+
+static void *pkvm_el2_mod_alloc_hyp_va(size_t size)
+{
+	struct arm_smccc_res res;
+
+	arm_smccc_1_1_hvc(KVM_HOST_SMCCC_FUNC(__pkvm_alloc_module_va), size >> PAGE_SHIFT, &res);
+	if (res.a0 != SMCCC_RET_SUCCESS || !res.a1)
+		return NULL;
+
+	return (void *)res.a1;
+}
+
+static __ref void *pkvm_el2_mod_alloc_mod_direct(unsigned long start, unsigned long end)
+{
+	if (mod_direct_hyp_base)
+		goto alloc;
+
+	mod_direct_kern_base = module_direct_base ?: module_plt_base;
+	if (WARN_ON(!mod_direct_kern_base))
+		return NULL;
+
+	mod_direct_hyp_base = (unsigned long)pkvm_el2_mod_alloc_hyp_va(PKVM_EL2_MOD_DIRECT_RANGE);
+	if (!mod_direct_hyp_base) {
+		mod_direct_kern_base = 0;
+		return NULL;
+	}
+
+alloc:
+	if (start < mod_direct_kern_base ||
+		end > mod_direct_kern_base + PKVM_EL2_MOD_DIRECT_RANGE)
+		return NULL;
+
+	return (void *)(mod_direct_hyp_base + (start - mod_direct_kern_base));
+}
+
+static void *pkvm_el2_mod_alloc_va(unsigned long start, unsigned long end)
+{
+	void *hyp_va;
+
+	hyp_va = pkvm_el2_mod_alloc_mod_direct(start, end);
+
+	return hyp_va ?: pkvm_el2_mod_alloc_hyp_va(end - start);
+}
+
 int __pkvm_load_el2_module(struct module *this)
 {
 	struct pkvm_el2_module *mod = &this->arch.hyp;
@@ -1606,7 +1864,6 @@ int __pkvm_load_el2_module(struct module *this)
 		{ &mod->data, KVM_PGTABLE_PROT_R | KVM_PGTABLE_PROT_W },
 	};
 	void *start, *end, *hyp_va, *mod_remap;
-	struct arm_smccc_res res;
 	kvm_nvhe_reloc_t *endrel;
 	int ret, i, secs_first;
 	size_t size;
@@ -1640,14 +1897,12 @@ int __pkvm_load_el2_module(struct module *this)
 	mod->sections.start = start;
 	mod->sections.end = end;
 
-	arm_smccc_1_1_hvc(KVM_HOST_SMCCC_FUNC(__pkvm_alloc_module_va),
-			  size >> PAGE_SHIFT, &res);
-	if (res.a0 != SMCCC_RET_SUCCESS || !res.a1) {
+	hyp_va = pkvm_el2_mod_alloc_va((unsigned long)start, (unsigned long)end);
+	if (!hyp_va) {
 		kvm_err("Failed to allocate hypervisor VA space for EL2 module\n");
 		module_put(this);
-		return res.a0 == SMCCC_RET_SUCCESS ? -ENOMEM : -EPERM;
+		return -ENOMEM;
 	}
-	hyp_va = (void *)res.a1;
 	mod->hyp_va = hyp_va;
 
 	/* Relies on kvm_apply_hyp_module_relocations() sync_icache_aliases */
@@ -1686,7 +1941,8 @@ int __pkvm_load_el2_module(struct module *this)
 	if (ret) {
 		kvm_err("Failed to init EL2 module: %d\n", ret);
 		list_del(&mod->node);
-		pkvm_unmap_module_sections(secs_map, hyp_va, ARRAY_SIZE(secs_map));
+		pkvm_unmap_module_sections(secs_map + secs_first, hyp_va,
+					   ARRAY_SIZE(secs_map) - secs_first);
 		module_put(this);
 		return ret;
 	}
@@ -1721,15 +1977,27 @@ void pkvm_el2_mod_frob_sections(Elf_Ehdr *ehdr, Elf_Shdr *sechdrs, char *secstri
 }
 #endif /* CONFIG_MODULES */
 
-static int __pkvm_topup_hyp_alloc_mgt_mc(unsigned long id, struct kvm_hyp_memcache *mc)
+int __pkvm_topup_hyp_alloc_mgt_mc(enum hyp_alloc_mgt_id id, struct kvm_hyp_memcache *mc)
 {
 	struct arm_smccc_res res;
+	int ret;
 
-	res = kvm_call_hyp_nvhe_smccc(__pkvm_hyp_alloc_mgt_refill,
-				      id, mc->head, mc->nr_pages);
-	mc->head = res.a2;
-	mc->nr_pages = res.a3;
-	return res.a1;
+	do {
+		res = kvm_call_hyp_nvhe_smccc(__pkvm_hyp_alloc_mgt_refill, id, mc->head,
+					      mc->nr_pages);
+		ret = res.a1;
+		mc->head = res.a3 & PAGE_MASK;
+		mc->nr_pages = res.a3 & ~PAGE_MASK;
+
+		if (!ret)
+			break;
+
+		ret = __pkvm_handle_smccc_req(&res, NULL);
+		if (ret)
+			return ret;
+	} while (1);
+
+	return ret;
 }
 
 int __pkvm_topup_hyp_alloc(unsigned long nr_pages)
@@ -1751,9 +2019,9 @@ int __pkvm_topup_hyp_alloc(unsigned long nr_pages)
 }
 EXPORT_SYMBOL(__pkvm_topup_hyp_alloc);
 
-unsigned long __pkvm_reclaim_hyp_alloc_mgt(unsigned long nr_pages)
+unsigned long __pkvm_reclaim_hyp_alloc_mgt_id(enum hyp_alloc_mgt_id id, unsigned long nr_pages)
 {
-	unsigned long ratelimit, last_reclaim, reclaimed = 0;
+	unsigned long ratelimit, reclaimed = 0;
 	struct kvm_hyp_memcache mc;
 	struct arm_smccc_res res;
 
@@ -1763,50 +2031,67 @@ unsigned long __pkvm_reclaim_hyp_alloc_mgt(unsigned long nr_pages)
 		/* Arbitrary upper bound to limit the time spent at EL2 */
 		ratelimit = min(nr_pages, 16UL);
 
-		arm_smccc_1_1_hvc(KVM_HOST_SMCCC_FUNC(__pkvm_hyp_alloc_mgt_reclaim),
-				  ratelimit, &res);
-		if (WARN_ON(res.a0 != SMCCC_RET_SUCCESS))
+		arm_smccc_1_1_hvc(KVM_HOST_SMCCC_FUNC(__pkvm_hyp_alloc_mgt_reclaim), id, ratelimit,
+				  &res);
+		if (WARN_ON(res.a0 != SMCCC_RET_SUCCESS) || !res.a2)
 			break;
 
 		mc.head = res.a1;
-		last_reclaim = mc.nr_pages = res.a2;
+		mc.nr_pages = res.a2;
 
-		free_hyp_memcache(&mc);
-		reclaimed += last_reclaim;
-
-	} while (last_reclaim && (reclaimed < nr_pages));
+		if (id == HYP_ALLOC_MGT_IOMMU_ID)
+			reclaimed += __pkvm_free_iommu_hyp_memcache(&mc);
+		else if (id == HYP_ALLOC_MGT_HOSTS2_ID)
+			reclaimed += __free_hyp_memcache(&mc, __host_stage2_free, kvm_host_va,
+							 NULL);
+		else
+			reclaimed += free_hyp_memcache(&mc);
+	} while (reclaimed < nr_pages);
 
 	return reclaimed;
 }
 
+unsigned long __pkvm_reclaim_hyp_alloc_mgt(unsigned long nr_pages)
+{
+	unsigned long total = 0;
+	enum hyp_alloc_mgt_id id = __HYP_ALLOC_MGT_HEAP_ID_START__;
+
+	while ((id < NR_ALLOC_MGT_IDS) && (total < nr_pages))
+		total += __pkvm_reclaim_hyp_alloc_mgt_id(id++, nr_pages - total);
+
+	return total;
+}
+
+int __pkvm_handle_smccc_req(struct arm_smccc_res *res, void *arg)
+{
+	struct kvm_hyp_req req;
+
+	if (smccc_to_hyp_req(&req, res))
+		return handle_hyp_req(NULL, &req, arg);
+
+	return res->a1;
+}
+
 static int early_ffa_unmap_on_lend_cfg(char *arg)
 {
-	static_branch_enable(&kvm_ffa_unmap_on_lend);
+	bool enable;
+
+	if (!arg)
+		kvm_nvhe_sym(__pkvm_ffa_unmap_on_lend) = PKVM_FFA_UNMAP_ON_LEND_ON;
+	else if (!strcmp(arg, "full"))
+		kvm_nvhe_sym(__pkvm_ffa_unmap_on_lend) = PKVM_FFA_UNMAP_ON_LEND_FULL;
+	else {
+		if (!kstrtobool(arg, &enable)) {
+			kvm_nvhe_sym(__pkvm_ffa_unmap_on_lend) = enable;
+		} else {
+			kvm_err("kvm-arm.ffa-unmap-on-lend: Unknown argument '%s'\n", arg);
+			return -EINVAL;
+		}
+	}
+
 	return 0;
 }
 early_param("kvm-arm.ffa-unmap-on-lend", early_ffa_unmap_on_lend_cfg);
-
-int __pkvm_topup_hyp_alloc_mgt_gfp(unsigned long id, unsigned long nr_pages,
-				   unsigned long sz_alloc, gfp_t gfp)
-{
-	struct kvm_hyp_memcache mc;
-	int ret;
-
-	init_hyp_memcache(&mc);
-
-	ret = topup_hyp_memcache_gfp(&mc, nr_pages, get_order(sz_alloc), gfp);
-	if (ret)
-		return ret;
-
-	ret = __pkvm_topup_hyp_alloc_mgt_mc(id, &mc);
-	if (ret) {
-		kvm_err("Failed topup %ld pages = %ld, size = %ld err = %d, freeing %ld pages\n",
-			id, nr_pages, sz_alloc, ret, mc.nr_pages);
-		free_hyp_memcache(&mc);
-	}
-
-	return ret;
-}
 
 static int __pkvm_donate_resource(struct resource *r)
 {

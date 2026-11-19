@@ -17,6 +17,12 @@
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
 
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/blk.h>
+
+#include <linux/android_kabi.h>
+ANDROID_KABI_DECLONLY(trace_eval_map);
+
 /*
  * Recalculate wakeup batch when tag is shared by hctx.
  */
@@ -109,10 +115,6 @@ void __blk_mq_tag_idle(struct blk_mq_hw_ctx *hctx)
 static int __blk_mq_get_tag(struct blk_mq_alloc_data *data,
 			    struct sbitmap_queue *bt)
 {
-	if (!data->q->elevator && !(data->flags & BLK_MQ_REQ_RESERVED) &&
-			!hctx_may_queue(data->hctx, bt))
-		return BLK_MQ_NO_TAG;
-
 	if (data->shallow_depth)
 		return sbitmap_queue_get_shallow(bt, data->shallow_depth);
 	else
@@ -188,6 +190,7 @@ unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 			break;
 
 		bt_prev = bt;
+		trace_android_rvh_blk_mq_get_tag(NULL);
 		io_schedule();
 
 		sbitmap_finish_wait(bt, ws, &wait);

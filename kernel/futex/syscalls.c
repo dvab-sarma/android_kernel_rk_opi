@@ -4,6 +4,7 @@
 #include <linux/time_namespace.h>
 
 #include "futex.h"
+#include <trace/hooks/futex.h>
 
 /*
  * Support for robust futexes: the kernel cleans up held futexes at
@@ -122,6 +123,7 @@ long do_futex(u32 __user *uaddr, int op, u32 val, ktime_t *timeout,
 			return -ENOSYS;
 	}
 
+	trace_android_vh_do_futex(uaddr, cmd, &flags, uaddr2);
 	switch (cmd) {
 	case FUTEX_WAIT:
 		val3 = FUTEX_BITSET_MATCH_ANY;
@@ -458,6 +460,14 @@ SYSCALL_DEFINE4(futex_requeue,
 	ret = futex_parse_waitv(futexes, waiters, 2, futex_wake_mark, NULL);
 	if (ret)
 		return ret;
+
+	/*
+	 * For now mandate both flags are identical, like the sys_futex()
+	 * interface has. If/when we merge the variable sized futex support,
+	 * that patch can modify this test to allow a difference in size.
+	 */
+	if (futexes[0].w.flags != futexes[1].w.flags)
+		return -EINVAL;
 
 	cmpval = futexes[0].w.val;
 

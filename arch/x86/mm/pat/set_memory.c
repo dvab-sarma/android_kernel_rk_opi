@@ -32,6 +32,7 @@
 #include <asm/pgalloc.h>
 #include <asm/proto.h>
 #include <asm/memtype.h>
+#include <asm/pkvm_guest.h>
 
 #include "../mm_internal.h"
 
@@ -429,7 +430,7 @@ static void cpa_collapse_large_pages(struct cpa_data *cpa)
 
 	list_for_each_entry_safe(ptdesc, tmp, &pgtables, pt_list) {
 		list_del(&ptdesc->pt_list);
-		__free_page(ptdesc_page(ptdesc));
+		pagetable_free(ptdesc);
 	}
 }
 
@@ -2462,6 +2463,9 @@ bool set_memory_enc_stop_conversion(void)
 static int __set_memory_enc_dec(unsigned long addr, int numpages, bool enc)
 {
 	int ret = 0;
+
+	if (pkvm_is_protected_guest())
+		return pkvm_set_mem_host_visibility(addr, numpages, enc);
 
 	if (cc_platform_has(CC_ATTR_MEM_ENCRYPT)) {
 		if (!down_read_trylock(&mem_enc_lock))

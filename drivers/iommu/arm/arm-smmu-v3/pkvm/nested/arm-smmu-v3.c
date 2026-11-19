@@ -28,6 +28,10 @@ void *__memset(void *dst, int c, size_t count)
 	return memset(dst, c, count);
 }
 
+void *memcpy(void *dst, const void *src, size_t count)
+{
+	return CALL_FROM_OPS(memcpy, dst, src, count);
+}
 #ifdef CONFIG_LIST_HARDENED
 bool __list_add_valid_or_report(struct list_head *new,
 				struct list_head *prev,
@@ -79,6 +83,16 @@ static bool is_smmu_enabled(struct hyp_arm_smmu_v3_nested_device *smmu)
 	return FIELD_GET(CR0_SMMUEN, smmu->cr0);
 }
 
+static bool is_evtq_enabled(struct hyp_arm_smmu_v3_nested_device *smmu)
+{
+	return FIELD_GET(CR0_EVTQEN, smmu->cr0);
+}
+
+static bool is_priq_enabled(struct hyp_arm_smmu_v3_nested_device *smmu)
+{
+	return FIELD_GET(CR0_PRIQEN, smmu->cr0);
+}
+
 static void smmu_copy_from_host(struct hyp_arm_smmu_v3_device *smmu,
 				void *dst_hyp_va, void *src_hyp_va,
 				size_t size)
@@ -97,23 +111,26 @@ static void smmu_copy_from_host(struct hyp_arm_smmu_v3_device *smmu,
 static int smmu_share_pages(phys_addr_t addr, size_t size)
 {
 	int i;
-	size_t nr_pages = PAGE_ALIGN(size) >> PAGE_SHIFT;
+	phys_addr_t base = addr & PAGE_MASK;
+	size_t nr_pages = PAGE_ALIGN(size + (addr & ~PAGE_MASK)) >> PAGE_SHIFT;
 
 	for (i = 0 ; i < nr_pages ; ++i)
-		WARN_ON(__pkvm_host_share_hyp((addr + i * PAGE_SIZE) >> PAGE_SHIFT));
+		WARN_ON(__pkvm_host_share_hyp((base + i * PAGE_SIZE) >> PAGE_SHIFT));
 
-	return hyp_pin_shared_mem(hyp_phys_to_virt(addr), hyp_phys_to_virt(addr + size));
+	return hyp_pin_shared_mem(hyp_phys_to_virt(base),
+				  hyp_phys_to_virt(base + nr_pages * PAGE_SIZE));
 }
 
 static int smmu_unshare_pages(phys_addr_t addr, size_t size)
 {
 	int i;
-	size_t nr_pages = PAGE_ALIGN(size) >> PAGE_SHIFT;
+	phys_addr_t base = addr & PAGE_MASK;
+	size_t nr_pages = PAGE_ALIGN(size + (addr & ~PAGE_MASK)) >> PAGE_SHIFT;
 
-	hyp_unpin_shared_mem(hyp_phys_to_virt(addr), hyp_phys_to_virt(addr + size));
+	hyp_unpin_shared_mem(hyp_phys_to_virt(base), hyp_phys_to_virt(base + nr_pages * PAGE_SIZE));
 
 	for (i = 0 ; i < nr_pages ; ++i)
-		WARN_ON(__pkvm_host_unshare_hyp((addr + i * PAGE_SIZE) >> PAGE_SHIFT));
+		WARN_ON(__pkvm_host_unshare_hyp((base + i * PAGE_SIZE) >> PAGE_SHIFT));
 
 	return 0;
 }
@@ -124,14 +141,6 @@ static int smmu_abort_gbpa(struct hyp_arm_smmu_v3_device *smmu)
 	/* Wait till UPDATE is cleared. */
 	return smmu_wait(false,
 			 readl_relaxed(smmu->base + ARM_SMMU_GBPA) == GBPA_ABORT);
-}
-
-static bool smmu_cmdq_has_space(struct arm_smmu_queue *cmdq, u32 n)
-{
-	struct arm_smmu_ll_queue *llq = &cmdq->llq;
-
-	WRITE_ONCE(llq->cons, readl_relaxed(cmdq->cons_reg));
-	return queue_has_space(llq, n);
 }
 
 static int smmu_send_cmd(struct hyp_arm_smmu_v3_device *smmu,
@@ -167,13 +176,6 @@ static int smmu_tlb_inv_range_smmu(struct hyp_arm_smmu_v3_device *smmu,
 static void smmu_tlb_inv_range(unsigned long iova, size_t size, size_t granule,
 			       bool leaf)
 {
-	struct arm_smmu_cmdq_ent cmd = {
-		.opcode = CMDQ_OP_TLBI_S2_IPA,
-		.tlbi = {
-			.leaf = leaf,
-			.vmid = 0,
-		},
-	};
 	struct arm_smmu_cmdq_ent cmd_s1 = {
 		.opcode = CMDQ_OP_TLBI_NH_ALL,
 		.tlbi = {
@@ -183,7 +185,15 @@ static void smmu_tlb_inv_range(unsigned long iova, size_t size, size_t granule,
 	struct hyp_arm_smmu_v3_nested_device *nested_smmu;
 
 	for_each_smmu(nested_smmu) {
-		kvm_smmu_lock(&nested_smmu->common);
+		struct arm_smmu_cmdq_ent cmd = {
+			.opcode = CMDQ_OP_TLBI_S2_IPA,
+			.tlbi = {
+				.leaf = leaf,
+				.vmid = 0,
+			},
+		};
+
+		kvm_smmu_hw_lock(nested_smmu);
 		/*
 		 * Don't bother if SMMU is disabled, this would be useful for the case
 		 * when RPM is supported to avoid thouching the SMMU MMIO when disabled.
@@ -191,11 +201,11 @@ static void smmu_tlb_inv_range(unsigned long iova, size_t size, size_t granule,
 		 * enabled. As otherwise the host can prevent the hypervisor from doing
 		 * TLB invalidations.
 		 */
-		if (is_smmu_enabled(nested_smmu)) {
+		if (nested_smmu->active) {
 			WARN_ON(smmu_tlb_inv_range_smmu(&nested_smmu->common, &cmd, iova, size, granule));
 			WARN_ON(smmu_send_cmd(&nested_smmu->common, &cmd_s1));
 		}
-		kvm_smmu_unlock(&nested_smmu->common);
+		kvm_smmu_hw_unlock(nested_smmu);
 	}
 }
 
@@ -273,8 +283,6 @@ static int smmu_probe(struct hyp_arm_smmu_v3_nested_device *nested_smmu)
 	else if (!smmu->oas)
 		smmu->oas = 48;
 
-	smmu->ias = 64;
-	smmu->ias = min(smmu->ias, smmu->oas);
 	return 0;
 }
 
@@ -317,8 +325,12 @@ static void smmu_attach_stage_2(struct arm_smmu_ste *ste)
 
 	cfg = FIELD_GET(STRTAB_STE_0_CFG, ste->data[0]);
 	if (!FIELD_GET(STRTAB_STE_0_V, ste->data[0]) ||
-	    (cfg == STRTAB_STE_0_CFG_ABORT))
+	    (cfg == STRTAB_STE_0_CFG_ABORT)) {
+		ste->data[1] = 0;
+		ste->data[2] = 0;
+		ste->data[3] = 0;
 		return;
+	}
 	/* S2 is not advertised, that should never be attempted. */
 	if (WARN_ON(cfg == STRTAB_STE_0_CFG_NESTED))
 		return;
@@ -331,7 +343,10 @@ static void smmu_attach_stage_2(struct arm_smmu_ste *ste)
 	sl = pgt_cfg->arm_lpae_s2_cfg.vtcr.sl;
 	ts = pgt_cfg->arm_lpae_s2_cfg.vtcr.tsz;
 
+	ste->data[1] &= ~(STRTAB_STE_1_SHCFG |STRTAB_STE_1_EATS |
+			  STRTAB_STE_1_S2FWB | STRTAB_STE_1_STRW);
 	ste->data[1] |= FIELD_PREP(STRTAB_STE_1_SHCFG, STRTAB_STE_1_SHCFG_INCOMING);
+
 	/* The host shouldn't write dwords 2 and 3, overwrite them. */
 	ste->data[2] = FIELD_PREP(STRTAB_STE_2_VTCR,
 				  FIELD_PREP(STRTAB_STE_2_VTCR_S2PS, ps) |
@@ -348,63 +363,39 @@ static void smmu_attach_stage_2(struct arm_smmu_ste *ste)
 	ste->data[0] |= FIELD_PREP(STRTAB_STE_0_CFG, cfg | BIT(1));
 }
 
-/* Get an STE for a stream table base. */
-static struct arm_smmu_ste *smmu_get_ste_ptr(struct hyp_arm_smmu_v3_device *smmu,
-					     u32 sid, u64 *strtab)
+static int smmu_get_host_l2_ste(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
+				u32 sid, struct arm_smmu_ste *host_ste_out)
 {
-	struct arm_smmu_strtab_cfg *cfg = &smmu->strtab_cfg;
-	struct arm_smmu_ste *table = (struct arm_smmu_ste *)strtab;
-
-	if (smmu->features & ARM_SMMU_FEAT_2_LVL_STRTAB) {
-		struct arm_smmu_strtab_l1 *l1tab = (struct arm_smmu_strtab_l1 *)strtab;
-		u32 l1_idx = arm_smmu_strtab_l1_idx(sid);
-		struct arm_smmu_strtab_l2 *l2ptr;
-
-		if (WARN_ON(l1_idx >= cfg->l2.num_l1_ents) ||
-			!(l1tab[l1_idx].l2ptr & STRTAB_L1_DESC_SPAN))
-			return NULL;
-
-		l2ptr = hyp_phys_to_virt(l1tab[l1_idx].l2ptr & STRTAB_L1_DESC_L2PTR_MASK);
-		/* Two-level walk */
-		return &l2ptr->stes[arm_smmu_strtab_l2_idx(sid)];
-	}
-	if (WARN_ON(sid >= cfg->linear.num_ents))
-		return NULL;
-	return &table[sid];
-}
-
-static int smmu_shadow_l2_strtab(struct hyp_arm_smmu_v3_nested_device *nested_smmu, u32 sid)
-{
-	u32 idx = arm_smmu_strtab_l1_idx(sid);
 	u64 *host_ste_base = hyp_phys_to_virt(strtab_host_base(nested_smmu));
 	struct hyp_arm_smmu_v3_device *smmu = &nested_smmu->common;
-	struct arm_smmu_strtab_l1 *l1_desc = &smmu->strtab_cfg.l2.l1tab[idx];
-	u64 l1_desc_host;
-	struct arm_smmu_strtab_l2 *l2table;
+	struct arm_smmu_strtab_l1 host_l1_desc;
+	struct arm_smmu_strtab_l2 *l2ptr;
+	phys_addr_t host_l2_tab;
+	int ret;
 
-	l2table = kvm_iommu_donate_pages_atomic(get_order(sizeof(*l2table)));
-	if (!l2table)
-		return -ENOMEM;
+	host_l1_desc.l2ptr = le64_to_cpu(READ_ONCE(host_ste_base[arm_smmu_strtab_l1_idx(sid)]));
+	if (!(host_l1_desc.l2ptr & STRTAB_L1_DESC_SPAN))
+		return -EINVAL;
 
-	if (!(smmu->features & ARM_SMMU_FEAT_COHERENCY))
-		kvm_flush_dcache_to_poc(&host_ste_base[idx], sizeof(*l1_desc));
-	l1_desc_host = host_ste_base[idx];
+	host_l2_tab = host_l1_desc.l2ptr & STRTAB_L1_DESC_L2PTR_MASK;
+	/* Share and pin the table before accessing it. */
+	ret = smmu_share_pages(host_l2_tab, sizeof(struct arm_smmu_strtab_l2));
+	if (ret)
+		return ret;
 
-	arm_smmu_write_strtab_l1_desc(l1_desc, hyp_virt_to_phys(l2table));
-	if (!(smmu->features & ARM_SMMU_FEAT_COHERENCY))
-		kvm_flush_dcache_to_poc(l1_desc, sizeof(*l1_desc));
-
-	smmu_share_pages(l1_desc_host & STRTAB_L1_DESC_L2PTR_MASK, sizeof(*l2table));
+	l2ptr = hyp_phys_to_virt(host_l2_tab);
+	smmu_copy_from_host(smmu, host_ste_out, &l2ptr->stes[arm_smmu_strtab_l2_idx(sid)],
+			    STRTAB_STE_DWORDS << 3);
+	WARN_ON(smmu_unshare_pages(host_l2_tab, sizeof(struct arm_smmu_strtab_l2)));
 	return 0;
 }
 
-static void smmu_reshadow_ste(struct hyp_arm_smmu_v3_nested_device *nested_smmu, u32 sid, bool leaf)
+static int smmu_reshadow_ste(struct hyp_arm_smmu_v3_nested_device *nested_smmu, u32 sid, bool leaf)
 {
 	struct hyp_arm_smmu_v3_device *smmu = &nested_smmu->common;
-	u64 *host_ste_base = hyp_phys_to_virt(strtab_host_base(nested_smmu));
+	struct arm_smmu_strtab_cfg *cfg = &smmu->strtab_cfg;
 	u64 *hyp_ste_base = strtab_hyp_base(smmu);
-	struct arm_smmu_ste *host_ste_ptr = smmu_get_ste_ptr(smmu, sid, host_ste_base);
-	struct arm_smmu_ste *hyp_ste_ptr = smmu_get_ste_ptr(smmu, sid, hyp_ste_base);
+	struct arm_smmu_ste *hyp_ste_ptr;
 	struct arm_smmu_ste target = {};
 	struct arm_smmu_cmdq_ent cfgi_cmd = {
 		.opcode	= CMDQ_OP_CFGI_STE,
@@ -413,24 +404,54 @@ static void smmu_reshadow_ste(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
 			.leaf	= true,
 		},
 	};
-	int i;
+	int i, ret;
 
 	/*
 	 * Linux only uses leaf = 1, when leaf is 0, we need to verify that this
 	 * is a 2 level table and reshadow of l2.
 	 * Also Linux never clears l1 ptr, that needs to free the old shadow.
 	 */
-	if (WARN_ON(!leaf || !host_ste_ptr))
-		return;
+	if (!leaf || sid >= (1UL << strtab_log2size(nested_smmu)) ||
+	    !is_smmu_enabled(nested_smmu))
+		return -EINVAL;
 
-	/* If host is valid and hyp is not, means a new L1 installed. */
-	if (!hyp_ste_ptr) {
-		WARN_ON(smmu_shadow_l2_strtab(nested_smmu, sid));
-		hyp_ste_ptr = smmu_get_ste_ptr(smmu, sid, hyp_ste_base);
+	if (!(smmu->features & ARM_SMMU_FEAT_2_LVL_STRTAB)) {
+		struct arm_smmu_ste *hyp_table = (struct arm_smmu_ste *)hyp_ste_base;
+		u64 *host_ste_base = hyp_phys_to_virt(strtab_host_base(nested_smmu));
+		struct arm_smmu_ste *host_table = (struct arm_smmu_ste *)host_ste_base;
+
+		if (sid >= cfg->linear.num_ents)
+			return -E2BIG;
+
+		hyp_ste_ptr = &hyp_table[sid];
+		smmu_copy_from_host(smmu, target.data, host_table[sid].data,
+				    STRTAB_STE_DWORDS << 3);
+	} else {
+		struct arm_smmu_strtab_l1 *l1tab = (struct arm_smmu_strtab_l1 *)hyp_ste_base;
+		u32 l1_idx = arm_smmu_strtab_l1_idx(sid);
+		struct arm_smmu_strtab_l2 *l2ptr;
+
+		if (l1_idx >= cfg->l2.num_l1_ents)
+			return -E2BIG;
+
+		ret = smmu_get_host_l2_ste(nested_smmu, sid, &target);
+		if (ret)
+			return ret;
+
+		if (!l1tab[l1_idx].l2ptr) {
+			struct arm_smmu_strtab_l2 *l2table;
+
+			/* No hypervisor entry, first time the L2 is populated. */
+			l2table = kvm_iommu_donate_pages_atomic(get_order(sizeof(*l2table)));
+			if (!l2table)
+				return -ENOMEM;
+			arm_smmu_write_strtab_l1_desc(&l1tab[l1_idx], hyp_virt_to_phys(l2table));
+		}
+		l2ptr = hyp_phys_to_virt(le64_to_cpu(l1tab[l1_idx].l2ptr) &
+				STRTAB_L1_DESC_L2PTR_MASK);
+		hyp_ste_ptr = &l2ptr->stes[arm_smmu_strtab_l2_idx(sid)];
 	}
 
-	smmu_copy_from_host(smmu, target.data, host_ste_ptr->data,
-			    STRTAB_STE_DWORDS << 3);
 	/*
 	 * Typically, STE update is done as the following
 	 * 1- Write last 7 dwords, while STE is invalid
@@ -450,11 +471,15 @@ static void smmu_reshadow_ste(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
 	 * There is no need for last CFGI as it's done next.
 	 */
 	smmu_attach_stage_2(&target);
+
+	kvm_smmu_hw_lock(nested_smmu);
 	for (i = 1; i < STRTAB_STE_DWORDS; i++)
 		WRITE_ONCE(hyp_ste_ptr->data[i], target.data[i]);
 
 	WARN_ON(smmu_send_cmd(smmu, &cfgi_cmd));
 	WRITE_ONCE(hyp_ste_ptr->data[0], target.data[0]);
+	kvm_smmu_hw_unlock(nested_smmu);
+	return 0;
 }
 
 static int smmu_init_strtab(struct hyp_arm_smmu_v3_nested_device *nested_smmu)
@@ -526,6 +551,7 @@ static int smmu_init_device(struct hyp_arm_smmu_v3_nested_device *nested_smmu)
 	if (ret)
 		goto out_ret;
 	kvm_smmu_lock_init(smmu);
+	kvm_smmu_hw_lock_init(nested_smmu);
 
 	ret = smmu_init_cmdq(smmu);
 	if (ret)
@@ -561,7 +587,7 @@ static int smmu_init_pgt(void)
 	struct io_pgtable_ops *ops;
 
 	for_each_smmu(nested_smmu) {
-		cfg.ias = min(cfg.ias, nested_smmu->common.ias);
+		cfg.ias = min(cfg.ias, nested_smmu->common.oas);
 		cfg.oas = min(cfg.oas, nested_smmu->common.oas);
 		cfg.pgsize_bitmap &= nested_smmu->common.pgsize_bitmap;
 		cfg.coherent_walk &= !!(nested_smmu->common.features & ARM_SMMU_FEAT_COHERENCY);
@@ -611,8 +637,9 @@ out_reclaim_smmu:
 	return ret;
 }
 
-static bool smmu_filter_command(struct hyp_arm_smmu_v3_nested_device *smmu, u64 *command)
+static bool smmu_filter_command(struct hyp_arm_smmu_v3_nested_device *nested_smmu, u64 *command)
 {
+	struct hyp_arm_smmu_v3_device *smmu = &nested_smmu->common;
 	u64 type = FIELD_GET(CMDQ_0_OP, command[0]);
 
 	switch (type) {
@@ -620,8 +647,19 @@ static bool smmu_filter_command(struct hyp_arm_smmu_v3_nested_device *smmu, u64 
 	{
 		u32 sid = FIELD_GET(CMDQ_CFGI_0_SID, command[0]);
 		u32 leaf = FIELD_GET(CMDQ_CFGI_1_LEAF, command[1]);
+		bool ret;
 
-		smmu_reshadow_ste(smmu, sid, leaf);
+		/*
+		 * If STE update is required flush the CMDQ and drop the lock as that
+		 * might require to update the host page table and aquire its lock.
+		 */
+		writel(smmu->cmdq.llq.prod, smmu->cmdq.prod_reg);
+		kvm_smmu_hw_unlock(nested_smmu);
+		ret = smmu_reshadow_ste(nested_smmu, sid, leaf);
+		kvm_smmu_hw_lock(nested_smmu);
+		if (WARN_ON(ret))
+			return true;
+
 		break;
 	}
 	case CMDQ_OP_CFGI_ALL:
@@ -643,15 +681,14 @@ static bool smmu_filter_command(struct hyp_arm_smmu_v3_nested_device *smmu, u64 
 		/* Only allow VMID = 0*/
 		if (FIELD_GET(CMDQ_TLBI_0_VMID, command[0]) == 0)
 			break;
-		break;
+		return true;
 	}
-	case 0x10: /* CMD_TLBI_NH_ALL: Not used by Linux */
-	case CMDQ_OP_TLBI_EL2_ALL:
-	case CMDQ_OP_TLBI_EL2_VA:
-	case CMDQ_OP_TLBI_EL2_ASID:
-	case CMDQ_OP_TLBI_S12_VMALL:
-	case 0x23: /* CMD_TLBI_EL2_VAA: Not used by Linux */
-		return WARN_ON(true);
+	case CMDQ_OP_PREFETCH_CFG:
+	case CMDQ_OP_CFGI_CD:
+	case CMDQ_OP_CFGI_CD_ALL:
+	case CMDQ_OP_TLBI_NH_ALL:
+	case CMDQ_OP_TLBI_NSNH_ALL:
+		break;
 	case CMDQ_OP_CMD_SYNC:
 		if (FIELD_GET(CMDQ_SYNC_0_CS, command[0]) == CMDQ_SYNC_0_CS_IRQ) {
 			/* Allow it, but let the host timeout, as this should never happen. */
@@ -660,6 +697,9 @@ static bool smmu_filter_command(struct hyp_arm_smmu_v3_nested_device *smmu, u64 
 			command[1] &= ~CMDQ_SYNC_1_MSIADDR_MASK;
 		}
 		break;
+	default:
+		/* Deny unknown commands */
+		return true;
 	}
 
 	return false;
@@ -667,7 +707,7 @@ static bool smmu_filter_command(struct hyp_arm_smmu_v3_nested_device *smmu, u64 
 
 static void smmu_emulate_cmdq_insert(struct hyp_arm_smmu_v3_nested_device *nested_smmu)
 {
-	u64 *host_cmdq = hyp_phys_to_virt(nested_smmu->cmdq_host.q_base & Q_BASE_ADDR_MASK);
+	u64 *host_cmdq = hyp_phys_to_virt(nested_smmu->cmdq_host.base_dma);
 	struct hyp_arm_smmu_v3_device *smmu = &nested_smmu->common;
 	int idx;
 	u64 cmd[CMDQ_ENT_DWORDS];
@@ -679,6 +719,7 @@ static void smmu_emulate_cmdq_insert(struct hyp_arm_smmu_v3_nested_device *neste
 		return;
 
 	space = (1 << (nested_smmu->cmdq_host.llq.max_n_shift)) - queue_space(&nested_smmu->cmdq_host.llq);
+	kvm_smmu_hw_lock(nested_smmu);
 	/* Wait for the command queue to have some space. */
 	WARN_ON(smmu_wait(use_wfe, smmu_cmdq_has_space(&smmu->cmdq, space)));
 
@@ -689,14 +730,15 @@ static void smmu_emulate_cmdq_insert(struct hyp_arm_smmu_v3_nested_device *neste
 		smmu_copy_from_host(smmu, cmd, &host_cmdq[idx * CMDQ_ENT_DWORDS],
 				    CMDQ_ENT_DWORDS << 3);
 		skip = smmu_filter_command(nested_smmu, cmd);
-		if (skip)
+		if (WARN_ON(skip))
 			continue;
 		smmu_add_cmd_raw(smmu, cmd);
 	}
 
-	writel_relaxed(smmu->cmdq.llq.prod, smmu->cmdq.prod_reg);
+	writel(smmu->cmdq.llq.prod, smmu->cmdq.prod_reg);
 
 	WARN_ON(smmu_wait(use_wfe, smmu_cmdq_empty(&smmu->cmdq)));
+	kvm_smmu_hw_unlock(nested_smmu);
 }
 
 static void smmu_update_ste_shadow(struct hyp_arm_smmu_v3_nested_device *nested_smmu, bool enabled)
@@ -709,6 +751,10 @@ static void smmu_update_ste_shadow(struct hyp_arm_smmu_v3_nested_device *nested_
 		strtab_size = strtab_l1_size(nested_smmu);
 		WARN_ON(fmt != STRTAB_BASE_CFG_FMT_2LVL);
 		WARN_ON((strtab_split(nested_smmu) != STRTAB_SPLIT));
+		WARN_ON(strtab_split(nested_smmu) >= strtab_log2size(nested_smmu));
+		WARN_ON(strtab_log2size(nested_smmu) >
+			(ilog2(STRTAB_MAX_L1_ENTRIES) + STRTAB_SPLIT));
+
 	} else {
 		strtab_size = strtab_size(nested_smmu);
 		WARN_ON(fmt != STRTAB_BASE_CFG_FMT_LINEAR);
@@ -722,11 +768,44 @@ static void smmu_update_ste_shadow(struct hyp_arm_smmu_v3_nested_device *nested_
 		WARN_ON(smmu_unshare_pages(strtab_host_base(nested_smmu), strtab_size));
 }
 
+static int smmu_flush_all_tlb(struct hyp_arm_smmu_v3_nested_device *nested_smmu)
+{
+	struct hyp_arm_smmu_v3_device *smmu = &nested_smmu->common;
+	int ret;
+	u32 cr0;
+	struct arm_smmu_cmdq_ent cmd = {
+		.opcode = CMDQ_OP_TLBI_NSNH_ALL,
+	};
+
+	kvm_smmu_hw_lock(nested_smmu);
+	/*
+	 * This must be called when the SMMU is getting enabled.
+	 * First enable the cmdq and then invalidate the TLB.
+	 */
+	cr0 = readl_relaxed(smmu->base + ARM_SMMU_CR0);
+	if (!(cr0 & CR0_CMDQEN)) {
+		cr0 |= CR0_CMDQEN;
+		writel_relaxed(cr0, smmu->base + ARM_SMMU_CR0);
+		ret = smmu_wait(false,
+				readl_relaxed(smmu->base + ARM_SMMU_CR0ACK) == cr0);
+		if (ret) {
+			kvm_smmu_hw_unlock(nested_smmu);
+			return ret;
+		}
+	}
+
+	ret = smmu_send_cmd(smmu, &cmd);
+	kvm_smmu_hw_unlock(nested_smmu);
+	return ret;
+}
+
 static void smmu_emulate_enable(struct hyp_arm_smmu_v3_nested_device *nested_smmu)
 {
 	/* Enabling SMMU without CMDQ, means TLB invalidation won't work. */
 	WARN_ON(!is_cmdq_enabled(nested_smmu));
 	smmu_update_ste_shadow(nested_smmu, true);
+	/* Clean the TLBs each time the SMMU is enabled. */
+	WARN_ON(smmu_flush_all_tlb(nested_smmu));
 }
 
 static void smmu_emulate_disable(struct hyp_arm_smmu_v3_nested_device *nested_smmu)
@@ -737,7 +816,8 @@ static void smmu_emulate_disable(struct hyp_arm_smmu_v3_nested_device *nested_sm
 static void smmu_emulate_cmdq_enable(struct hyp_arm_smmu_v3_nested_device *nested_smmu)
 {
 	nested_smmu->cmdq_host.llq.max_n_shift = nested_smmu->cmdq_host.q_base & Q_BASE_LOG2SIZE;
-	nested_smmu->cmdq_host.base_dma = nested_smmu->cmdq_host.q_base & Q_BASE_ADDR_MASK;
+	nested_smmu->cmdq_host.base_dma = nested_smmu->cmdq_host.q_base &
+		Q_BASE_ADDR_MASK & ((1ULL << nested_smmu->common.oas) - 1);
 	WARN_ON(smmu_share_pages(nested_smmu->cmdq_host.base_dma,
 				 cmdq_size(&nested_smmu->cmdq_host)));
 }
@@ -746,6 +826,16 @@ static void smmu_emulate_cmdq_disable(struct hyp_arm_smmu_v3_nested_device *smmu
 {
 	WARN_ON(smmu_unshare_pages(smmu->cmdq_host.base_dma,
 				   cmdq_size(&smmu->cmdq_host)));
+}
+
+static void smmu_emulate_queue(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
+				   unsigned long q_base, size_t ent_size_shift)
+{
+	/* Q_BASE_ADDR_MASK is not enough as the SMMU also ignores bits > OAS */
+	phys_addr_t base = q_base & Q_BASE_ADDR_MASK & ((1ULL << nested_smmu->common.oas) - 1);
+	size_t size = 1UL << (FIELD_GET(Q_BASE_LOG2SIZE, q_base) + ent_size_shift);
+
+	WARN_ON(smmu_share_pages(base, size));
 }
 
 static bool smmu_dabt_device(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
@@ -759,14 +849,14 @@ static bool smmu_dabt_device(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
 	const u64 no_access = 0;
 	u64 mask = no_access;
 	const u64 read_only = is_write ? no_access : read_write;
-	u64 val = regs->regs[rd];
 	struct hyp_arm_smmu_v3_device *smmu = &nested_smmu->common;
-
+	bool is_xzr = (rd == 31);
+	u64 val = is_xzr ? 0 : regs->regs[rd];
 
 	switch (off) {
 	case ARM_SMMU_IDR0:
 		/* Clear stage-2 support, hide MSI to avoid write back to cmdq */
-		mask = read_only & ~(IDR0_S2P | IDR0_VMID16 | IDR0_MSI | IDR0_HYP);
+		mask = read_only & ~(IDR0_S2P | IDR0_VMID16 | IDR0_MSI | IDR0_HYP | IDR0_ATS);
 		WARN_ON(len != sizeof(u32));
 		break;
 	case ARM_SMMU_CMDQ_BASE:
@@ -775,7 +865,8 @@ static bool smmu_dabt_device(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
 			WARN_ON(is_cmdq_enabled(nested_smmu));
 			nested_smmu->cmdq_host.q_base = val;
 		} else {
-			regs->regs[rd] = nested_smmu->cmdq_host.q_base;
+			val = nested_smmu->cmdq_host.q_base;
+			goto out_update_regs;
 		}
 		goto out_ret;
 	case ARM_SMMU_CMDQ_PROD:
@@ -783,7 +874,8 @@ static bool smmu_dabt_device(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
 			nested_smmu->cmdq_host.llq.prod = val;
 			smmu_emulate_cmdq_insert(nested_smmu);
 		} else {
-			regs->regs[rd] = nested_smmu->cmdq_host.llq.prod;
+			val = nested_smmu->cmdq_host.llq.prod;
+			goto out_update_regs;
 		}
 		goto out_ret;
 	case ARM_SMMU_CMDQ_CONS:
@@ -796,7 +888,8 @@ static bool smmu_dabt_device(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
 			u32 cons = readl_relaxed(smmu->base + ARM_SMMU_CMDQ_CONS);
 			u32 err = CMDQ_CONS_ERR & cons;
 
-			regs->regs[rd] = nested_smmu->cmdq_host.llq.cons | err;
+			val = nested_smmu->cmdq_host.llq.cons | err;
+			goto out_update_regs;
 		}
 		goto out_ret;
 	case ARM_SMMU_STRTAB_BASE:
@@ -815,8 +908,10 @@ static bool smmu_dabt_device(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
 		goto out_ret;
 	case ARM_SMMU_GBPA:
 		/* Ignore write, always read to abort. */
-		if (!is_write)
-			regs->regs[rd] = GBPA_ABORT;
+		if (!is_write) {
+			val = GBPA_ABORT;
+			goto out_update_regs;
+		}
 
 		WARN_ON(len != sizeof(u32));
 		goto out_ret;
@@ -824,12 +919,31 @@ static bool smmu_dabt_device(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
 		if (is_write) {
 			bool last_cmdq_en = is_cmdq_enabled(nested_smmu);
 			bool last_smmu_en = is_smmu_enabled(nested_smmu);
+			bool last_evtq_en = is_evtq_enabled(nested_smmu);
+			bool last_priq_en = is_priq_enabled(nested_smmu);
 
 			nested_smmu->cr0 = val;
 			if (!last_cmdq_en && is_cmdq_enabled(nested_smmu))
 				smmu_emulate_cmdq_enable(nested_smmu);
 			else if (last_cmdq_en && !is_cmdq_enabled(nested_smmu))
 				smmu_emulate_cmdq_disable(nested_smmu);
+
+			/*
+			 * Share PRI and EVTQ to avoid the host using them to write to
+			 * protected memory. However, panic on disable for those queues
+			 * as that is more complicated, unsharing from here can lead to
+			 * use-after-unshare issues, and requires ordering with cr0ack.
+			 * As the host never disable those queues, don't support that.
+			 */
+			if (!last_evtq_en && is_evtq_enabled(nested_smmu))
+				smmu_emulate_queue(nested_smmu, nested_smmu->evtq_base, EVTQ_ENT_SZ_SHIFT);
+			else if (last_evtq_en && !is_evtq_enabled(nested_smmu))
+				WARN_ON(1);
+			if (!last_priq_en && is_priq_enabled(nested_smmu))
+				smmu_emulate_queue(nested_smmu, nested_smmu->priq_base, PRIQ_ENT_SZ_SHIFT);
+			else if (last_priq_en && !is_priq_enabled(nested_smmu))
+				WARN_ON(1);
+
 			if (!last_smmu_en && is_smmu_enabled(nested_smmu))
 				smmu_emulate_enable(nested_smmu);
 			else if (last_smmu_en && !is_smmu_enabled(nested_smmu))
@@ -853,34 +967,67 @@ static bool smmu_dabt_device(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
 		WARN_ON(len != sizeof(u32));
 		break;
 	}
+	case ARM_SMMU_EVTQ_BASE:
+		if (len != sizeof(u64))
+			break;
+
+		if (is_write) {
+			if (is_evtq_enabled(nested_smmu))
+				break;
+			nested_smmu->evtq_base = val;
+		}
+		mask = read_write;
+		break;
+
+	case ARM_SMMU_PRIQ_BASE:
+		if (len != sizeof(u64))
+			break;
+
+		if (is_write) {
+			if (is_priq_enabled(nested_smmu))
+				break;
+			nested_smmu->priq_base = val;
+		}
+		mask = read_write;
+		break;
 	/*
 	 * These should be safe, just enforce RO or RW and size according to architecture.
 	 * There are some other registers that are not used by Linux as IDR2, IDR4
 	 * that won't be allowed.
 	 */
-	case ARM_SMMU_EVTQ_PROD + SZ_64K:
-	case ARM_SMMU_EVTQ_CONS + SZ_64K:
 	case ARM_SMMU_EVTQ_IRQ_CFG1:
 	case ARM_SMMU_EVTQ_IRQ_CFG2:
-	case ARM_SMMU_PRIQ_PROD + SZ_64K:
-	case ARM_SMMU_PRIQ_CONS + SZ_64K:
-	case ARM_SMMU_PRIQ_IRQ_CFG1:
-	case ARM_SMMU_PRIQ_IRQ_CFG2:
-	case ARM_SMMU_GERRORN:
 	case ARM_SMMU_GERROR_IRQ_CFG1:
 	case ARM_SMMU_GERROR_IRQ_CFG2:
+	case ARM_SMMU_PRIQ_IRQ_CFG1:
+	case ARM_SMMU_PRIQ_IRQ_CFG2:
+		/* These are RES0 as MSI support is hidden. */
+		val = 0;
+		if (!is_write)
+			goto out_update_regs;
+		fallthrough;
+	case ARM_SMMU_EVTQ_PROD + SZ_64K:
+	case ARM_SMMU_EVTQ_CONS + SZ_64K:
+	case ARM_SMMU_PRIQ_PROD + SZ_64K:
+	case ARM_SMMU_PRIQ_CONS + SZ_64K:
+	case ARM_SMMU_GERRORN:
 	case ARM_SMMU_IRQ_CTRLACK:
 	case ARM_SMMU_IRQ_CTRL:
 	case ARM_SMMU_CR0ACK:
 	case ARM_SMMU_CR2:
 		/* These are 32 bit registers. */
 		WARN_ON(len != sizeof(u32));
-		fallthrough;
-	case ARM_SMMU_EVTQ_BASE:
+		mask = read_write;
+		break;
 	case ARM_SMMU_EVTQ_IRQ_CFG0:
-	case ARM_SMMU_PRIQ_BASE:
 	case ARM_SMMU_PRIQ_IRQ_CFG0:
 	case ARM_SMMU_GERROR_IRQ_CFG0:
+		if (len != sizeof(u64))
+			break;
+		/* These are RES0 as MSI support is hidden. */
+		val = 0;
+		if (!is_write)
+			goto out_update_regs;
 		mask = read_write;
 		break;
 	case ARM_SMMU_IIDR:
@@ -895,18 +1042,43 @@ static bool smmu_dabt_device(struct hyp_arm_smmu_v3_nested_device *nested_smmu,
 	if (WARN_ON(!mask))
 		goto out_ret;
 
+	kvm_smmu_hw_lock(nested_smmu);
 	if (is_write) {
 		if (len == sizeof(u64))
-			writeq_relaxed(regs->regs[rd] & mask, smmu->base + off);
+			writeq_relaxed(val & mask, smmu->base + off);
 		else
-			writel_relaxed(regs->regs[rd] & mask, smmu->base + off);
+			writel_relaxed(val & mask, smmu->base + off);
+
+		/*
+		 * Make sure writes to CR0 are immediately observed, that is important
+		 * when synchronizing with TLB invalidation as reading CR0 is enough
+		 * to deduce the SMMU state, and we have to enforce the ack with the
+		 * hw_lock aquired.
+		 */
+		if (off == ARM_SMMU_CR0) {
+			WARN_ON(smmu_wait(false,
+			        readl_relaxed(smmu->base + ARM_SMMU_CR0ACK) == (val & mask)));
+			nested_smmu->active = !!(val & CR0_CMDQEN);
+		}
+
+		kvm_smmu_hw_unlock(nested_smmu);
+		return true;
 	} else {
 		if (len == sizeof(u64))
-			regs->regs[rd] = readq_relaxed(smmu->base + off) & mask;
+			val = readq_relaxed(smmu->base + off) & mask;
 		else
-			regs->regs[rd] = readl_relaxed(smmu->base + off) & mask;
+			val = readl_relaxed(smmu->base + off) & mask;
 	}
 
+	kvm_smmu_hw_unlock(nested_smmu);
+
+out_update_regs:
+	/*
+	 * Device might be read senstive, so do it but ignore writing
+	 * back for xzr.
+	 */
+	if (!is_xzr)
+		regs->regs[rd] = val;
 out_ret:
 	return true;
 }
@@ -945,7 +1117,7 @@ static size_t smmu_pgsize_idmap(size_t size, u64 paddr, size_t pgsize_bitmap)
 	return BIT(__fls(pgsizes));
 }
 
-static void smmu_host_stage2_idmap(phys_addr_t start, phys_addr_t end, int prot)
+static int smmu_host_stage2_idmap(phys_addr_t start, phys_addr_t end, int prot)
 {
 	size_t size = end - start;
 	size_t pgsize, pgcount;
@@ -956,7 +1128,7 @@ static void smmu_host_stage2_idmap(phys_addr_t start, phys_addr_t end, int prot)
 
 	end = min(end, BIT(pgtable->cfg.oas));
 	if (start >= end)
-		return;
+		return 0;
 
 	if (prot) {
 		if (!(prot & IOMMU_MMIO))
@@ -969,25 +1141,35 @@ static void smmu_host_stage2_idmap(phys_addr_t start, phys_addr_t end, int prot)
 			pgcount = size / pgsize;
 			ret = pgtable->ops.map_pages(&pgtable->ops, start, start,
 						     pgsize, pgcount, prot, 0, &mapped);
+			/*
+			 * Failing to map isn't compromising security. Make sure we don't crash for
+			 * that.
+			 */
+			if (ret || !mapped)
+				return 0;
+
 			size -= mapped;
 			start += mapped;
-			if (!mapped || ret)
-				return;
 		}
 	} else {
 		while (size) {
+			iommu_iotlb_gather_init(&gather);
 			pgsize = smmu_pgsize_idmap(size, start, pgtable->cfg.pgsize_bitmap);
 			pgcount = size / pgsize;
 			unmapped = pgtable->ops.unmap_pages(&pgtable->ops, start,
 							    pgsize, pgcount, &gather);
-			size -= unmapped;
-			start += unmapped;
 			if (!unmapped)
 				break;
+
+			size -= unmapped;
+			start += unmapped;
 		}
 		/* Some memory were not unmapped. */
-		WARN_ON(size);
+		if (WARN_ON(size))
+			return -EINVAL;
 	}
+
+	return 0;
 }
 
 #ifdef MODULE

@@ -5,28 +5,34 @@ optimize kernel builds, improving performance for specific architectures and ker
 
 ## Profile Availability
 
-The AutoFDO profile (kernel.afdo) for vmlinux is updated regularly for the following kernel
-branches:
-
-* [android15-6.6](https://android.googlesource.com/kernel/common/+/refs/heads/android15-6.6/android/gki/aarch64/afdo)
-* [android16-6.12](https://android.googlesource.com/kernel/common/+/refs/heads/android16-6.12/gki/aarch64/afdo/)
+kernel.afdo is an AArch64 kernel profile collected on kernel version 6.18.32 (
+SHA 34cb3812e87a5b125ebc50a3ff7414948af70d80, build server ID 16114748). It is updated
+regularly in [kernel.afdo](https://android.googlesource.com/kernel/common/+/refs/heads/android17-6.18/gki/aarch64/afdo/).
 
 
 ## Performance improvements
 
-When applying these AutoFDO profiles to the android15-6.6 and android16-6.12 kernels, we observed
-the following performance improvements during testing on a Pixel 6 device.
+The benchmark results for the `android17-6.18` kernel are currently preliminary. Pixel devices
+have not yet been fully optimized for this kernel version regarding power management, CPU
+frequency scaling, and scheduling. Consequently, these numbers can't accurately reflect the
+expected performance of a fully tuned system. We anticipate improved results as the platform
+matures.
 
+Benchmark results were tested on Pixel 8.
 
-| Benchmark             | Improvement |
-| --------------------- | ----------- |
-| Boot time             | 2-3%        |
-| Cold App launch time  | 3-4%        |
-| Binder-rpc            | 8-9%        |
-| Binder-addints        | 12-25%      |
-| Hwbinder              | 12-18%      |
-| Bionic (syscall_mmap) | 6%          |
+| Benchmark             | Improvement (Mean / Best-case)* |
+| --------------------- | ------------------------------- |
+| Boot time             | 1.6%                            |
+| Cold App launch time  | 3.3%                            |
+| Binder-rpc            | 6.7% (up to 20.7%)*             |
+| Binder-addints        | 4.1% (up to 30.6%)*             |
+| Hwbinder              | 7.1% (up to 26.0%)*             |
 
+\* For binder benchmarks, both the average improvement (mean_diff) and the best observed improvement
+(min_diff) are reported. The benchmark results currently exhibit variance because the 6.18 kernel
+is in an early bringup stage on Pixel test devices (where power management, CPU frequency scaling,
+and scheduler tuning are still maturing), which introduces scheduling jitter and tail latency spikes
+that affect the mean improvement despite substantial peak and median gains.
 
 ## Steps to reproduce the profile
 

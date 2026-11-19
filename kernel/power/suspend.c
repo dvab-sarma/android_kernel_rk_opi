@@ -32,6 +32,7 @@
 #include <linux/moduleparam.h>
 #include <linux/fs.h>
 #include <linux/wakeup_reason.h>
+#include <trace/hooks/suspend.h>
 
 #include "power.h"
 
@@ -452,6 +453,7 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 
 	if (state == PM_SUSPEND_TO_IDLE) {
 		s2idle_loop();
+		pm_print_wakeup_irq();
 		goto Platform_wake;
 	}
 
@@ -475,6 +477,7 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 			error = suspend_ops->enter(state);
 			trace_suspend_resume(TPS("machine_suspend"),
 				state, false);
+			trace_android_vh_early_resume_begin(NULL);
 		} else if (*wakeup) {
 			error = -EBUSY;
 		}
@@ -485,6 +488,8 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 
 	arch_suspend_enable_irqs();
 	BUG_ON(irqs_disabled());
+
+	pm_print_wakeup_irq();
 
  Enable_cpus:
 	pm_sleep_enable_secondary_cpus();
@@ -501,6 +506,7 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 
  Platform_finish:
 	platform_resume_finish(state);
+	pm_print_wakeup_irq();
 	return error;
 }
 
@@ -543,6 +549,7 @@ int suspend_devices_and_enter(suspend_state_t state)
 	} while (!error && !wakeup && platform_suspend_again(state));
 
  Resume_devices:
+	trace_android_vh_resume_begin(NULL);
 	suspend_test_start();
 	dpm_resume_end(PMSG_RESUME);
 	suspend_test_finish("resume devices");
@@ -553,6 +560,7 @@ int suspend_devices_and_enter(suspend_state_t state)
  Close:
 	platform_resume_end(state);
 	pm_suspend_target_state = PM_SUSPEND_ON;
+	trace_android_vh_resume_end(NULL);
 	return error;
 
  Recover_platform:
@@ -605,7 +613,11 @@ static int enter_state(suspend_state_t state)
 
 	if (sync_on_suspend_enabled) {
 		trace_suspend_resume(TPS("sync_filesystems"), 0, true);
-		ksys_sync_helper();
+
+		error = pm_sleep_fs_sync();
+		if (error)
+			goto Unlock;
+
 		trace_suspend_resume(TPS("sync_filesystems"), 0, false);
 	}
 

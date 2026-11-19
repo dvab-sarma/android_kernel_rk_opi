@@ -4,8 +4,8 @@
 #define __USB_TYPEC_ALTMODE_H__
 
 #include <linux/usb/typec_altmode.h>
+#include <linux/android_kabi.h>
 
-struct bus_type;
 struct typec_mux;
 struct typec_retimer;
 
@@ -24,13 +24,9 @@ struct altmode {
 
 	struct altmode			*partner;
 	struct altmode			*plug[2];
+	ANDROID_KABI_RESERVE(1);
 };
 
 #define to_altmode(d) container_of(d, struct altmode, adev)
-
-extern const struct bus_type typec_bus;
-extern const struct device_type typec_altmode_dev_type;
-
-#define is_typec_altmode(_dev_) (_dev_->type == &typec_altmode_dev_type)
 
 #endif /* __USB_TYPEC_ALTMODE_H__ */

@@ -6,6 +6,7 @@
  *
  *   Copyright (c) 2002 by Takashi Iwai <tiwai@suse.de>
  */
+#include <linux/android_kabi.h>
 
 /* handling of USB vendor/product ID pairs as 32-bit numbers */
 #define USB_ID(vendor, product) (((unsigned int)(vendor) << 16) | (product))
@@ -75,6 +76,11 @@ struct snd_usb_audio {
 
 	unsigned int num_intf_to_ctrl;
 	struct snd_intf_to_ctrl intf_to_ctrl[MAX_CARD_INTERFACES];
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 #define USB_AUDIO_IFACE_UNUSED	((void *)-1L)
@@ -224,6 +230,10 @@ extern bool snd_usb_skip_validation;
  *  playback value represents muted state instead of minimum audible volume
  * QUIRK_FLAG_MIXER_CAPTURE_MIN_MUTE
  *  Similar to QUIRK_FLAG_MIXER_PLAYBACK_MIN_MUTE, but for capture streams
+ * QUIRK_FLAG_SKIP_IFACE_SETUP
+ *  Skip the probe-time interface setup (usb_set_interface,
+ *  init_pitch, init_sample_rate); redundant with
+ *  snd_usb_endpoint_prepare() at stream-open time
  */
 
 enum {
@@ -253,6 +263,7 @@ enum {
 	QUIRK_TYPE_MIC_RES_384			= 23,
 	QUIRK_TYPE_MIXER_PLAYBACK_MIN_MUTE	= 24,
 	QUIRK_TYPE_MIXER_CAPTURE_MIN_MUTE	= 25,
+	QUIRK_TYPE_SKIP_IFACE_SETUP		= 26,
 /* Please also edit snd_usb_audio_quirk_flag_names */
 };
 
@@ -284,5 +295,6 @@ enum {
 #define QUIRK_FLAG_MIC_RES_384			QUIRK_FLAG(MIC_RES_384)
 #define QUIRK_FLAG_MIXER_PLAYBACK_MIN_MUTE	QUIRK_FLAG(MIXER_PLAYBACK_MIN_MUTE)
 #define QUIRK_FLAG_MIXER_CAPTURE_MIN_MUTE	QUIRK_FLAG(MIXER_CAPTURE_MIN_MUTE)
+#define QUIRK_FLAG_SKIP_IFACE_SETUP		QUIRK_FLAG(SKIP_IFACE_SETUP)
 
 #endif /* __USBAUDIO_H */

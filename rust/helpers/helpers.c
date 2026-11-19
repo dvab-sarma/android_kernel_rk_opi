@@ -7,6 +7,37 @@
  * Sorted alphabetically.
  */
 
+#include <linux/compiler_types.h>
+
+#ifdef __BINDGEN__
+// Omit `inline` for bindgen as it ignores inline functions.
+#define __rust_helper
+#else
+// The helper functions are all inline functions.
+//
+// We use `__always_inline` here to bypass LLVM inlining checks, in case the
+// helpers are inlined directly into Rust CGUs.
+//
+// The LLVM inlining checks are false positives:
+// * LLVM doesn't want to inline functions compiled with
+//   `-fno-delete-null-pointer-checks` with code compiled without.
+//   The C CGUs all have this enabled and Rust CGUs don't. Inlining is okay
+//   since this is one of the hardening features that does not change the ABI,
+//   and we shouldn't have null pointer dereferences in these helpers.
+// * LLVM doesn't want to inline functions with different list of builtins. C
+//   side has `-fno-builtin-wcslen`; `wcslen` is not a Rust builtin, so they
+//   should be compatible, but LLVM does not perform inlining due to attributes
+//   mismatch.
+// * clang and Rust doesn't have the exact target string. Clang generates
+//   `+cmov,+cx8,+fxsr` but Rust doesn't enable them (in fact, Rust will
+//   complain if `-Ctarget-feature=+cmov,+cx8,+fxsr` is used). x86-64 always
+//   enable these features, so they are in fact the same target string, but
+//   LLVM doesn't understand this and so inlining is inhibited. This can be
+//   bypassed with `--ignore-tti-inline-compatible`, but this is a hidden
+//   option.
+#define __rust_helper __always_inline
+#endif
+
 #include "atomic.c"
 #include "auxiliary.c"
 #include "barrier.c"
@@ -18,6 +49,7 @@
 #include "build_assert.c"
 #include "build_bug.c"
 #include "clk.c"
+#include "compat.c"
 #include "completion.c"
 #include "cpu.c"
 #include "cpufreq.c"
@@ -25,17 +57,23 @@
 #include "cred.c"
 #include "device.c"
 #include "dma.c"
+#include "dma-buf.c"
 #include "drm.c"
 #include "err.c"
 #include "irq.c"
+#include "file.c"
 #include "fs.c"
+#include "interrupt.c"
 #include "io.c"
+#include "iommu.c"
 #include "jump_label.c"
+#include "kfifo.c"
 #include "kunit.c"
 #include "maple_tree.c"
 #include "mm.c"
 #include "mman.c"
 #include "mutex.c"
+#include "net/genetlink.c"
 #include "of.c"
 #include "page.c"
 #include "pci.c"
@@ -44,6 +82,7 @@
 #include "poll.c"
 #include "processor.c"
 #include "property.c"
+#include "ratelimit.c"
 #include "rbtree.c"
 #include "rcu.c"
 #include "refcount.c"
@@ -53,10 +92,12 @@
 #include "signal.c"
 #include "slab.c"
 #include "spinlock.c"
+#include "srcu.c"
 #include "sync.c"
 #include "task.c"
 #include "time.c"
 #include "uaccess.c"
+#include "uio.c"
 #include "vmalloc.c"
 #include "wait.c"
 #include "workqueue.c"

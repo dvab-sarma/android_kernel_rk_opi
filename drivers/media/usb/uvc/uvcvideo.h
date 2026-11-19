@@ -41,7 +41,8 @@
 #define UVC_EXT_GPIO_UNIT		0x7ffe
 #define UVC_EXT_GPIO_UNIT_ID		0x100
 
-#define UVC_INVALID_ENTITY_ID          0xffff
+#define UVC_HARDWARE_ENTITY_ID(id)	((id) & 0xff)
+#define UVC_INVALID_ENTITY_ID		0xffff
 
 /* ------------------------------------------------------------------------
  * Driver specific constants.
@@ -408,7 +409,7 @@ struct uvc_stats_stream {
 	unsigned int max_sof;		/* Maximum STC.SOF value */
 };
 
-#define UVC_METADATA_BUF_SIZE 10240
+#define UVC_METADATA_BUF_MIN_SIZE 10240
 
 /**
  * struct uvc_copy_op: Context structure to schedule asynchronous memcpy
@@ -481,6 +482,7 @@ struct uvc_streaming {
 	struct {
 		struct uvc_video_queue queue;
 		u32 format;
+		u32 buffersize;
 	} meta;
 
 	/* Context data used by the bulk completion handler. */
@@ -702,8 +704,10 @@ static inline int uvc_queue_streaming(struct uvc_video_queue *queue)
 }
 
 static inline struct uvc_streaming *
-uvc_queue_to_stream(struct uvc_video_queue *queue)
+uvc_queue_to_stream(struct uvc_video_queue *queue, unsigned int type)
 {
+	if (type == V4L2_BUF_TYPE_META_CAPTURE)
+		return container_of(queue, struct uvc_streaming, meta.queue);
 	return container_of(queue, struct uvc_streaming, queue);
 }
 

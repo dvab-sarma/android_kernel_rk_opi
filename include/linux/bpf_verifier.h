@@ -8,6 +8,7 @@
 #include <linux/btf.h> /* for struct btf and btf_id() */
 #include <linux/filter.h> /* for MAX_BPF_STACK */
 #include <linux/tnum.h>
+#include <linux/android_kabi.h>
 
 /* Maximum variable offset umax_value permitted when resolving memory accesses.
  * In practice this is far bigger than any realistic pointer offset; this limit
@@ -147,8 +148,12 @@ struct bpf_reg_state {
 	 * registers. Example:
 	 * r1 = r2;    both will have r1->id == r2->id == N
 	 * r1 += 10;   r1->id == N | BPF_ADD_CONST and r1->off == 10
+	 * r3 = r2;    both will have r3->id == r2->id == N
+	 * w3 += 10;   r3->id == N | BPF_ADD_CONST32 and r3->off == 10
 	 */
-#define BPF_ADD_CONST (1U << 31)
+#define BPF_ADD_CONST64 (1U << 31)
+#define BPF_ADD_CONST32 (1U << 30)
+#define BPF_ADD_CONST (BPF_ADD_CONST64 | BPF_ADD_CONST32)
 	u32 id;
 	/* PTR_TO_SOCKET and PTR_TO_TCP_SOCK could be a ptr returned
 	 * from a pointer-cast helper, bpf_sk_fullsock() and
@@ -663,6 +668,8 @@ struct bpf_subprog_info {
 	enum priv_stack_mode priv_stack_mode;
 	u8 arg_cnt;
 	struct bpf_subprog_arg_info args[MAX_BPF_FUNC_REG_ARGS];
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct bpf_verifier_env;
@@ -828,6 +835,9 @@ struct bpf_verifier_env {
 	/* array of pointers to bpf_scc_info indexed by SCC id */
 	struct bpf_scc_info **scc_info;
 	u32 scc_cnt;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 static inline struct bpf_func_info_aux *subprog_aux(struct bpf_verifier_env *env, int subprog)

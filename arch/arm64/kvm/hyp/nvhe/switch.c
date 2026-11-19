@@ -137,6 +137,16 @@ static bool __pmu_switch_to_guest(struct kvm_vcpu *vcpu)
 {
 	struct kvm_pmu_events *pmu = &vcpu->arch.pmu.events;
 
+	/*
+	 * A protected guest runs with MDCR_EL2.HPME=0, which gates the event
+	 * counters but not PMCCNTR_EL0/PMICNTR_EL0. The host-maintained mask is
+	 * untrusted and incomplete here, so disable whatever is enabled instead.
+	 */
+	if (vcpu_is_protected(vcpu) && system_supports_pmuv3()) {
+		pmu->events_host = read_sysreg(pmcntenset_el0);
+		pmu->events_guest = 0;
+	}
+
 	if (pmu->events_host)
 		write_sysreg(pmu->events_host, pmcntenclr_el0);
 
@@ -290,7 +300,7 @@ int __kvm_vcpu_run(struct kvm_vcpu *vcpu)
 	 * We're about to restore some new MMU state. Make sure
 	 * ongoing page-table walks that have started before we
 	 * trapped to EL2 have completed. This also synchronises the
-	 * above disabling of BRBE, SPE and TRBE.
+	 * above disabling of BRBE.
 	 *
 	 * See DDI0487I.a D8.1.5 "Out-of-context translation regimes",
 	 * rule R_LFHQG and subsequent information statements.
@@ -373,7 +383,12 @@ int __kvm_vcpu_run(struct kvm_vcpu *vcpu)
 static void (*hyp_panic_notifier)(struct user_pt_regs *regs);
 int __pkvm_register_hyp_panic_notifier(void (*cb)(struct user_pt_regs *regs))
 {
-	return cmpxchg(&hyp_panic_notifier, NULL, cb) ? -EBUSY : 0;
+	/*
+	 * Paired with smp_load_acquire(&hyp_panic_notifier) in hyp_panic().
+	 * Ensure the module's stores before registration are observed before
+	 * the notifier runs.
+	 */
+	return cmpxchg_release(&hyp_panic_notifier, NULL, cb) ? -EBUSY : 0;
 }
 
 asmlinkage void __noreturn hyp_panic(void)
@@ -387,7 +402,8 @@ asmlinkage void __noreturn hyp_panic(void)
 	host_ctxt = host_data_ptr(host_ctxt);
 	vcpu = host_ctxt->__hyp_running_vcpu;
 
-	if (READ_ONCE(hyp_panic_notifier))
+	/* Acquire the notifier published by __pkvm_register_hyp_panic_notifier(). */
+	if (smp_load_acquire(&hyp_panic_notifier))
 		hyp_panic_notifier(&host_ctxt->regs);
 
 	if (vcpu) {

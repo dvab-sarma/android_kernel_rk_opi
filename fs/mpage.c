@@ -29,6 +29,7 @@
 #include <linux/writeback.h>
 #include <linux/backing-dev.h>
 #include <linux/pagevec.h>
+#include <linux/cleancache.h>
 #include "internal.h"
 
 /*
@@ -276,6 +277,12 @@ static void do_mpage_readpage(struct mpage_readpage_args *args)
 		folio_set_mappedtodisk(folio);
 	}
 
+	if (fully_mapped && blocks_per_folio == 1 && !folio_test_uptodate(folio) &&
+	    cleancache_get_page(&folio->page) == 0) {
+		folio_mark_uptodate(folio);
+		goto confused;
+	}
+
 	/*
 	 * This folio will go to BIO.  Do we need to send this BIO off first?
 	 */
@@ -379,7 +386,7 @@ void mpage_readahead(struct readahead_control *rac, get_block_t get_block)
 	if (args.bio)
 		mpage_bio_submit_read(args.bio);
 }
-EXPORT_SYMBOL(mpage_readahead);
+EXPORT_SYMBOL_NS(mpage_readahead, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /*
  * This isn't called much at all
@@ -397,7 +404,7 @@ int mpage_read_folio(struct folio *folio, get_block_t get_block)
 		mpage_bio_submit_read(args.bio);
 	return 0;
 }
-EXPORT_SYMBOL(mpage_read_folio);
+EXPORT_SYMBOL_NS(mpage_read_folio, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /*
  * Writing is not so simple.
@@ -673,4 +680,4 @@ mpage_writepages(struct address_space *mapping,
 	blk_finish_plug(&plug);
 	return error;
 }
-EXPORT_SYMBOL(mpage_writepages);
+EXPORT_SYMBOL_NS(mpage_writepages, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");

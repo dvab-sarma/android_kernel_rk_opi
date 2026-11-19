@@ -23,6 +23,7 @@
 #include <linux/file_ref.h>
 #include <net/sock.h>
 #include <linux/init_task.h>
+#include <linux/dma-buf.h>
 
 #include "internal.h"
 
@@ -403,6 +404,7 @@ struct files_struct *dup_fd(struct files_struct *oldf, struct fd_range *punch_ho
 	new_fdt->open_fds = newf->open_fds_init;
 	new_fdt->full_fds_bits = newf->full_fds_bits_init;
 	new_fdt->fd = &newf->fd_array[0];
+	newf->dmabuf_info = NULL;
 
 	spin_lock(&oldf->file_lock);
 	old_fdt = files_fdtable(oldf);
@@ -491,6 +493,9 @@ static struct fdtable *close_files(struct files_struct * files)
 			if (set & 1) {
 				struct file *file = fdt->fd[i];
 				if (file) {
+					if (is_dma_buf_file(file))
+						dma_buf_unaccount_task(file->private_data,
+								       files->dmabuf_info);
 					filp_close(file, files);
 					cond_resched();
 				}
@@ -511,6 +516,7 @@ void put_files_struct(struct files_struct *files)
 		/* free the arrays if they are not embedded */
 		if (fdt != &files->fdtab)
 			__free_fdtable(fdt);
+		put_dmabuf_info(files->dmabuf_info);
 		kmem_cache_free(files_cachep, files);
 	}
 }
@@ -657,6 +663,14 @@ void fd_install(unsigned int fd, struct file *file)
 	if (WARN_ON_ONCE(unlikely(file->f_mode & FMODE_BACKING)))
 		return;
 
+	if (is_dma_buf_file(file)) {
+		int err = dma_buf_account_task(file->private_data, files->dmabuf_info);
+
+		if (err)
+			pr_err("dmabuf accounting failed during %s operation, err %d\n",
+			       __func__, err);
+	}
+
 	rcu_read_lock_sched();
 
 	if (unlikely(files->resize_in_progress)) {
@@ -702,6 +716,8 @@ struct file *file_close_fd_locked(struct files_struct *files, unsigned fd)
 	fd = array_index_nospec(fd, fdt->max_fds);
 	file = rcu_dereference_raw(fdt->fd[fd]);
 	if (file) {
+		if (is_dma_buf_file(file))
+			dma_buf_unaccount_task(file->private_data, files->dmabuf_info);
 		rcu_assign_pointer(fdt->fd[fd], NULL);
 		__put_unused_fd(files, fd);
 	}
@@ -721,7 +737,7 @@ int close_fd(unsigned fd)
 
 	return filp_close(file, files);
 }
-EXPORT_SYMBOL(close_fd);
+EXPORT_SYMBOL_NS(close_fd, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 
 /**
  * last_fd - return last valid index into fd table
@@ -801,6 +817,7 @@ SYSCALL_DEFINE3(close_range, unsigned int, fd, unsigned int, max_fd,
 
 	if ((flags & CLOSE_RANGE_UNSHARE) && atomic_read(&cur_fds->count) > 1) {
 		struct fd_range range = {fd, max_fd}, *punch_hole = &range;
+		struct task_dma_buf_info *dmabuf_info;
 
 		/*
 		 * If the caller requested all fds to be made cloexec we always
@@ -813,6 +830,18 @@ SYSCALL_DEFINE3(close_range, unsigned int, fd, unsigned int, max_fd,
 		fds = dup_fd(cur_fds, punch_hole);
 		if (IS_ERR(fds))
 			return PTR_ERR(fds);
+
+		/*
+		 * This is a new partial sharing relationship, since we have a new files_struct.
+		 * Since partial sharing is not supported for dmabuf accounting, we need to remove
+		 * the accounting info from the task. Leave the cur_fds->dmabuf_info so any existing
+		 * accounting can be unaccounted properly.
+		 */
+		task_lock(current);
+		dmabuf_info = current->dmabuf_info;
+		current->dmabuf_info = NULL;
+		task_unlock(current);
+		put_dmabuf_info(dmabuf_info);
 		/*
 		 * We used to share our file descriptor table, and have now
 		 * created a private one, make sure we're using it below.
@@ -858,6 +887,7 @@ struct file *file_close_fd(unsigned int fd)
 
 	return file;
 }
+EXPORT_SYMBOL_GPL(file_close_fd);
 
 void do_close_on_exec(struct files_struct *files)
 {
@@ -886,6 +916,8 @@ void do_close_on_exec(struct files_struct *files)
 			rcu_assign_pointer(fdt->fd[fd], NULL);
 			__put_unused_fd(files, fd);
 			spin_unlock(&files->file_lock);
+			if (is_dma_buf_file(file))
+				dma_buf_unaccount_task(file->private_data, files->dmabuf_info);
 			filp_close(file, files);
 			cond_resched();
 			spin_lock(&files->file_lock);
@@ -1269,6 +1301,27 @@ __releases(&files->file_lock)
 	struct file *tofree;
 	struct fdtable *fdt;
 
+	get_file(file);
+
+	/*
+	 * Must be done before the dup and the file_lock is dropped at the end of the function to
+	 * avoid a race with close(fd) from another thread, but we can't allocate while atomic, so
+	 * account up-front and rollback upon error.
+	 */
+	if (is_dma_buf_file(file)) {
+		int err;
+
+		spin_unlock(&files->file_lock);
+		err = dma_buf_account_task(file->private_data, files->dmabuf_info);
+		if (err) {
+			pr_err("dmabuf accounting failed during %s operation, err %d\n", __func__,
+			       err);
+			fput(file);
+			return err;
+		}
+		spin_lock(&files->file_lock);
+	}
+
 	/*
 	 * dup2() is expected to close the file installed in the target fd slot
 	 * (if any). However, userspace hand-picking a fd may be racing against
@@ -1300,18 +1353,23 @@ __releases(&files->file_lock)
 	tofree = rcu_dereference_raw(fdt->fd[fd]);
 	if (!tofree && fd_is_open(fd, fdt))
 		goto Ebusy;
-	get_file(file);
 	rcu_assign_pointer(fdt->fd[fd], file);
 	__set_open_fd(fd, fdt, flags & O_CLOEXEC);
 	spin_unlock(&files->file_lock);
 
-	if (tofree)
+	if (tofree) {
+		if (is_dma_buf_file(tofree))
+			dma_buf_unaccount_task(tofree->private_data, files->dmabuf_info);
 		filp_close(tofree, files);
+	}
 
 	return fd;
 
 Ebusy:
 	spin_unlock(&files->file_lock);
+	if (is_dma_buf_file(file))
+		dma_buf_unaccount_task(file->private_data, files->dmabuf_info);
+	fput(file);
 	return -EBUSY;
 }
 

@@ -143,6 +143,7 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.journal_info	= NULL,
 	INIT_CPU_TIMERS(init_task)
 	.pi_lock	= __RAW_SPIN_LOCK_UNLOCKED(init_task.pi_lock),
+	.blocked_lock	= __RAW_SPIN_LOCK_UNLOCKED(init_task.blocked_lock),
 	.timer_slack_ns = 50000, /* 50 usec default slack */
 	.thread_pid	= &init_struct_pid,
 	.thread_node	= LIST_HEAD_INIT(init_signals.thread_head),
@@ -175,6 +176,13 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 #ifdef CONFIG_CPUSETS
 	.mems_allowed_seq = SEQCNT_SPINLOCK_ZERO(init_task.mems_allowed_seq,
 						 &init_task.alloc_lock),
+#endif
+	.blocked_donor = NULL,
+#ifdef CONFIG_SCHED_PROXY_EXEC
+	.blocked_head = LIST_HEAD_INIT(init_task.blocked_head),
+	.blocked_node = LIST_HEAD_INIT(init_task.blocked_node),
+	.blocked_activation_node = LIST_HEAD_INIT(init_task.blocked_activation_node),
+	.sleeping_owner = NULL,
 #endif
 #ifdef CONFIG_RT_MUTEXES
 	.pi_waiters	= RB_ROOT_CACHED,
@@ -227,6 +235,7 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.android_vendor_data1 = {0, },
 	.android_oem_data1 = {0, },
 #endif
+	.dmabuf_info = NULL,
 };
 EXPORT_SYMBOL(init_task);
 

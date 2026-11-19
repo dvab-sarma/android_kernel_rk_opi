@@ -207,6 +207,9 @@ struct sched_ext_entity {
 	struct list_head	tasks_node;
 };
 
+struct scx_sched;
+extern struct scx_sched __rcu *scx_root;
+struct scx_dispatch_q *find_user_dsq(struct scx_sched *sch, u64 dsq_id);
 void sched_ext_free(struct task_struct *p);
 void print_scx_info(const char *log_lvl, struct task_struct *p);
 void scx_softlockup(u32 dur_s);
@@ -228,6 +231,7 @@ struct scx_task_group {
 	u64			bw_period_us;
 	u64			bw_quota_us;
 	u64			bw_burst_us;
+	bool			idle;
 #endif
 };
 
