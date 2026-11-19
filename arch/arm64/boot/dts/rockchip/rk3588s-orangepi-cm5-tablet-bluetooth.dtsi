@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* AP6256 Bluetooth UART and control GPIOs: Android 13 CM5 tablet wiring. */
+&uart9 {
+    status = "okay";
+    pinctrl-names = "default";
+    pinctrl-0 = <&uart9m2_xfer &uart9m2_ctsn &uart9m2_rtsn>;
+    uart-has-rtscts;
+    bluetooth {
+        compatible = "brcm,bcm4345c5";
+        clocks = <&hym8563>;
+        clock-names = "lpo";
+        max-speed = <1500000>;
+        shutdown-gpios = <&gpio0 RK_PD3 GPIO_ACTIVE_HIGH>;
+        device-wakeup-gpios = <&gpio0 RK_PC6 GPIO_ACTIVE_HIGH>;
+        interrupt-parent = <&gpio0>;
+        interrupts = <RK_PC5 IRQ_TYPE_LEVEL_HIGH>;
+        interrupt-names = "host-wakeup";
+        pinctrl-names = "default";
+        pinctrl-0 = <&bt_enable &bt_wake &bt_host_wake>;
+    };
+};
+
+&pinctrl {
+    wireless-bluetooth {
+        bt_enable: bt-enable {
+            rockchip,pins = <0 RK_PD3 RK_FUNC_GPIO &pcfg_pull_none>;
+        };
+        bt_wake: bt-wake {
+            rockchip,pins = <0 RK_PC6 RK_FUNC_GPIO &pcfg_pull_none>;
+        };
+        bt_host_wake: bt-host-wake {
+            rockchip,pins = <0 RK_PC5 RK_FUNC_GPIO &pcfg_pull_down>;
+        };
+    };
+};
