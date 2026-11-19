@@ -10400,3 +10400,7 @@ CONFIG_MEMTEST=n
 #
 # end of Rust hacking
 # end of Kernel hacking
+
+# Match Android 17 GKI export CRC generation for all RK3588 board builds.
+CONFIG_GENDWARFKSYMS=y
+# CONFIG_GENKSYMS is not set
